@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { AppHeader } from "@/components/AppHeader";
 
 export const metadata: Metadata = {
   title: "SPM Dev Agent",
@@ -13,8 +14,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="ja" className="h-full antialiased">
-      <body className="min-h-full flex flex-col">
-        {children}
+      <body className="min-h-full flex flex-col bg-slate-50">
+        <AppHeader />
+        <main className="flex-1">{children}</main>
       </body>
     </html>
   );
