@@ -1,9 +1,36 @@
 import "dotenv/config";
+import bcrypt from "bcryptjs";
 import { PrismaClient } from "../src/generated/prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL ?? "" });
 const prisma = new PrismaClient({ adapter });
+
+// 初期管理者アカウント。本人が初回ログイン後に必ずパスワードを変更する（mustChangePassword=true）。
+// 既存 email はパスワード上書きしない（運用中アカウント事故防止）。
+const ADMIN_SEED = {
+  email: "takeshi.ishii@peco-japan.com",
+  name: "石井 豪",
+  initialPassword: "PecoAdmin2026!",
+};
+
+async function seedAdmin(): Promise<void> {
+  const existing = await prisma.user.findUnique({ where: { email: ADMIN_SEED.email } });
+  if (existing) {
+    console.log(`Admin user already exists: ${ADMIN_SEED.email} (skipping)`);
+    return;
+  }
+  await prisma.user.create({
+    data: {
+      email: ADMIN_SEED.email,
+      name: ADMIN_SEED.name,
+      passwordHash: await bcrypt.hash(ADMIN_SEED.initialPassword, 10),
+      role: "ADMIN",
+      mustChangePassword: true,
+    },
+  });
+  console.log(`Created admin user: ${ADMIN_SEED.email}`);
+}
 
 const SEED_APPS = [
   {
@@ -63,6 +90,8 @@ const SEED_APPS = [
 ];
 
 async function main() {
+  await seedAdmin();
+
   console.log("Seeding portfolio apps...");
 
   for (const app of SEED_APPS) {

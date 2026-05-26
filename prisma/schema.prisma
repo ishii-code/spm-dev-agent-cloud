@@ -28,10 +28,38 @@ model Project {
   parallelWorkingDir String? // tick 再開時に Claude Code を起動する作業ディレクトリ
   parallelDoneNotifiedAt DateTime? // 全完了通知の冪等化
   archivedAt    DateTime? // ソフトデリート時刻（UI 非表示・DB 上は保持）
+  // 所有者・担当者（Phase 2 で導入）。既存行のため nullable。
+  ownerId       Int?
+  owner         User?      @relation("ProjectOwner", fields: [ownerId], references: [id])
+  assigneeId    Int?
+  assignee      User?      @relation("ProjectAssignee", fields: [assigneeId], references: [id])
   createdAt     DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
   sessions     Session[]
   documents    Document[]
+}
+
+model User {
+  id                  Int       @id @default(autoincrement())
+  email               String    @unique
+  name                String
+  passwordHash        String    @map("password_hash")
+  role                UserRole  @default(USER)
+  // 仮パスワード中フラグ。新規発行/管理者リセット時に true、本人が変更すると false。
+  mustChangePassword  Boolean   @default(true) @map("must_change_password")
+  lastLoginAt         DateTime? @map("last_login_at")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  ownedProjects       Project[] @relation("ProjectOwner")
+  assignedProjects    Project[] @relation("ProjectAssignee")
+
+  @@map("users")
+}
+
+enum UserRole {
+  ADMIN
+  USER
 }
 
 enum BusinessCategory {
