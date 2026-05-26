@@ -34,3 +34,6 @@ Obsidian Vault は Google Drive 同期。実体パスは以下：
 - 詳細仕様・設計議論は Obsidian / Slack canvas に集約。本ファイルはクラウド版開発時の最小コンテキストのみ。
 - Phase 1.2 を超える話題が出た場合は実装ログを先に参照する。
 - 既存 `AGENTS.md` はローカル版コピー由来の医療法対応セクション。クラウド版用書き換えは引き継ぎ事項。
+
+## UI ルール
+peco-ui スキル（spm-medical-pack/skills/peco-ui/SKILL.md）を必ず参照すること。
