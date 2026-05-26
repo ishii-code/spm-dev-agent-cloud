@@ -1,0 +1,34 @@
+# Build artefacts / caches
+node_modules
+.next
+out
+build
+coverage
+*.tsbuildinfo
+
+# Prisma generated client (regenerated in builder stage)
+src/generated
+
+# Local dev / VCS / editor
+.git
+.gitignore
+.DS_Store
+.vscode
+.idea
+
+# Secrets — never bake into image
+.env
+.env.*
+!.env.example
+
+# Claude Code personal config
+.claude
+
+# Docs (not needed at runtime)
+README.md
+AGENTS.md
+CLAUDE.md
+
+# Dockerfile itself (already part of context send)
+Dockerfile
+.dockerignore
