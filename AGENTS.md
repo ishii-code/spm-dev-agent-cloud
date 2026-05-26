@@ -40,3 +40,7 @@ spm-dev-agent が他リポジトリ向けに生成するコードは、対象シ
 ### 自動起動するスキル
 
 このリポジトリで作業中：通常はトリガされない。生成対象が医療システムの場合は対象リポジトリで自動起動する。
+
+## UI ルール
+新規プロジェクト作成時は必ず spm-medical-pack の peco-ui スキルを参照すること。
+https://github.com/peco-vets/spm-medical-pack/blob/main/skills/peco-ui/SKILL.md
