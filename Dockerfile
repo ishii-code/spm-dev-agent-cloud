@@ -21,6 +21,15 @@ RUN npm ci
 
 # ---- builder: prisma generate + next build ----
 FROM base AS builder
+# Placeholder env vars so module-level SDK clients (Prisma, OpenAI, Anthropic, Slack)
+# don't error during Next.js route metadata collection at build time.
+# NOT propagated to runner stage (different FROM).
+ENV DATABASE_URL="postgresql://build:build@localhost:5432/build?schema=public"
+ENV ANTHROPIC_API_KEY="sk-build-dummy"
+ENV OPENAI_API_KEY="sk-build-dummy"
+ENV SLACK_BOT_TOKEN="xoxb-build-dummy"
+ENV SLACK_SIGNING_SECRET="build-dummy"
+ENV AUTH_SECRET="build-dummy"
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npx prisma generate
