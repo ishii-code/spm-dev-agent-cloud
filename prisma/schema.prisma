@@ -1,0 +1,170 @@
+// SPM Dev Agent — Phase1 MVP
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Project {
+  id           String     @id @default(cuid())
+  title        String
+  description  String?
+  status       String     @default("active") // active / completed / archived
+  projectType  String     @default("existing") // existing / new
+  targetSystem String? // spm-project-2 / spm-diagnosis / peco-stock / peco-property / spm-dev-agent / other
+  targetLabel   String? // 表示用ラベル（例：SFA、診断支援）
+  skipRequirements Boolean @default(false) // true: ヒアリング・議論をスキップして直接実装
+  isParallel    Boolean @default(false) // 並列ウォーターフォール実行フラグ
+  businessCategory BusinessCategory @default(uncategorized) // 事業カテゴリ（システム一覧のグルーピング用）
+  orgName       OrgName?   @default(UNASSIGNED) // 組織別ビューの所属組織（D&D で変更）。enum OrgName を再利用
+  slackThreadTs String?
+  // 並列ウォーターフォール tick 駆動状態（サーバー再起動耐性のためDBに永続化）
+  parallelStatus    String?  // null / "running" / "done"
+  parallelRunId     String?  // 現在 tick を保持しているランID（再起動時にクリア）
+  parallelWorkingDir String? // tick 再開時に Claude Code を起動する作業ディレクトリ
+  parallelDoneNotifiedAt DateTime? // 全完了通知の冪等化
+  archivedAt    DateTime? // ソフトデリート時刻（UI 非表示・DB 上は保持）
+  createdAt     DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  sessions     Session[]
+  documents    Document[]
+}
+
+enum BusinessCategory {
+  clinic_ops    // 🏥 クリニック運営
+  medical_ai    // 🤖 メディカルAI
+  biz_marketing // 💼 経営・マーケティング
+  data_platform // 📊 データ基盤
+  dev_tools     // 🛠️ 開発・運用ツール
+  experimental  // 🧪 実験・検証
+  uncategorized // 📦 未分類（デフォルト）
+}
+
+model Session {
+  id            String    @id @default(cuid())
+  projectId     String
+  project       Project   @relation(fields: [projectId], references: [id])
+  messages      Message[]
+  status        String    @default("active")
+  debateContext Json?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id])
+  role      String // user / orchestrator / agent1 / agent2 / agent3
+  content   String   @db.Text
+  agentType String? // orchestrator / requirements / pm / qa
+  metadata  Json? // スプリント情報・テスト結果等
+  createdAt DateTime @default(now())
+}
+
+model Document {
+  id           String    @id @default(cuid())
+  projectId    String
+  project      Project   @relation(fields: [projectId], references: [id])
+  type         String // requirements / sprint / test_report / summary
+  title        String
+  content      String    @db.Text
+  obsidianPath String? // Obsidianに保存したパス
+  partNumber   Int? // 並列実行時のパート番号（1始まり）
+  partTitle    String? // パートのタイトル
+  executionLog String?   @db.Text // Claude Code実行ログ
+  // waiting / awaiting_approval / executing / completed / skipped / error
+  executionStatus String?  @default("waiting")
+  executedAt   DateTime?
+  // 並列 tick 駆動メタデータ
+  dependsOn        Json?     // number[] — 依存先 partNumber
+  nextActionAt     DateTime? // 次回 tick で処理対象になる時刻（再試行用）
+  notifiedStartAt  DateTime? // Slack 開始通知済み時刻（冪等化／成功時のみ set）
+  notifiedDoneAt   DateTime? // Slack 完了通知済み時刻（冪等化／成功時のみ set）
+  notifiedErrorAt  DateTime? // Slack エラー通知済み時刻（冪等化／成功時のみ set）
+  retryCount       Int       @default(0) // ネットワーク起因エラーの自動リトライ回数
+  slackApprovalTs  String?   // Slack 承認メッセージの ts（リアクション再評価用）
+  // ノンブロッキング・ステートマシン用
+  approvalState    String?   // 'none' / 'posted' / 'approved' / 'rejected'
+  approvalPostedAt DateTime? // 承認リクエスト送信時刻
+  execPid          Int?      // 実行中 Claude Code プロセスの PID
+  execStartedAt    DateTime? // 実行開始時刻（タイムアウト判定用）
+  execDoneFile     String?   // 完了検出用ファイルパス（中身に終了コードを書く）
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model ApprovalRequest {
+  id          String   @id @default(cuid())
+  sessionId   String
+  type        String // security / db_schema / auth / external_api
+  title       String
+  description String   @db.Text
+  status      String   @default("pending") // pending / approved / rejected
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model AppPortfolio {
+  id          String               @id @default(cuid())
+  name        String
+  description String               @default("")
+  status      AppStatus            @default(NOT_STARTED)
+  techStack   String               @default("")
+  portNumber  Int?
+  isFromCode  Boolean              @default(false)
+  businessCategory BusinessCategory @default(uncategorized) // 事業カテゴリ（カテゴリ別ビューのグルーピング用）
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  orgMappings OrgAppMapping[]
+  changeLogs  PortfolioChangeLog[]
+}
+
+enum AppStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+  UNDER_REVISION
+}
+
+model OrgAppMapping {
+  id        String       @id @default(cuid())
+  appId     String
+  orgName   OrgName
+  createdAt DateTime     @default(now())
+  app       AppPortfolio @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, orgName])
+}
+
+enum OrgName {
+  CLINIC_DEV
+  OPERATIONS
+  MARKETING
+  HR
+  PRODUCT
+  BACK_OFFICE
+  UNASSIGNED
+}
+
+model PortfolioChangeLog {
+  id         String       @id @default(cuid())
+  appId      String
+  appName    String
+  changeType ChangeType
+  fieldName  String
+  oldValue   String
+  newValue   String
+  changedBy  String       @default("admin")
+  changedAt  DateTime     @default(now())
+  app        AppPortfolio @relation(fields: [appId], references: [id], onDelete: Cascade)
+}
+
+enum ChangeType {
+  STATUS_CHANGE
+  ORG_MAPPING_CHANGE
+}

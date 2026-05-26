@@ -1,0 +1,134 @@
+:root {
+  /* Primary（メインカラー：イエロー） */
+  --peco-primary: #FCB900;
+  --peco-primary-dark: #E0A500;
+  --peco-primary-light: #FFF9E6;
+  --peco-primary-subtle: #FFFCF0;
+
+  /* Secondary（サブカラー：オレンジ） */
+  --peco-secondary: #FF6900;
+  --peco-secondary-dark: #E55E00;
+  --peco-secondary-light: #FFF0E6;
+
+  /* Background / Text */
+  --peco-bg: #FFFFFF;
+  --peco-text-primary: #1A1A1A;
+  --peco-text-secondary: #555555;
+  --peco-text-muted: #888888;
+
+  /* Semantic */
+  --peco-success: #27AE60;
+  --peco-success-light: #E8F8EE;
+  --peco-warning: #F39C12;
+  --peco-warning-light: #FEF9E7;
+  --peco-danger: #E74C3C;
+  --peco-danger-light: #FDEDEC;
+  --peco-info: #2980B9;
+  --peco-info-light: #EBF5FB;
+
+  /* Triage */
+  --peco-triage-green: #27AE60;
+  --peco-triage-yellow: #F39C12;
+  --peco-triage-red: #E74C3C;
+
+  /* Neutral */
+  --peco-gray-900: #1A1A2E;
+  --peco-gray-700: #374151;
+  --peco-gray-500: #6B7280;
+  --peco-gray-300: #D1D5DB;
+  --peco-gray-100: #F3F4F6;
+  --peco-gray-50: #F9FAFB;
+  --peco-white: #FFFFFF;
+
+  /* Typography */
+  --peco-font-sans: 'Noto Sans JP', 'Inter', sans-serif;
+  --peco-text-xs: 12px;
+  --peco-text-sm: 14px;
+  --peco-text-base: 16px;
+  --peco-text-lg: 18px;
+  --peco-text-xl: 20px;
+  --peco-text-2xl: 24px;
+
+  /* Spacing */
+  --peco-radius-sm: 6px;
+  --peco-radius-md: 10px;
+  --peco-radius-lg: 16px;
+  --peco-radius-xl: 24px;
+
+  /* Shadow */
+  --peco-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --peco-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.10);
+  --peco-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+@import "tailwindcss";
+
+@theme inline {
+  --color-peco-primary: var(--peco-primary);
+  --color-peco-primary-dark: var(--peco-primary-dark);
+  --color-peco-primary-light: var(--peco-primary-light);
+  --color-peco-primary-subtle: var(--peco-primary-subtle);
+  --color-peco-secondary: var(--peco-secondary);
+  --color-peco-secondary-dark: var(--peco-secondary-dark);
+  --color-peco-secondary-light: var(--peco-secondary-light);
+  --color-peco-bg: var(--peco-bg);
+  --color-peco-text-primary: var(--peco-text-primary);
+  --color-peco-text-secondary: var(--peco-text-secondary);
+  --color-peco-text-muted: var(--peco-text-muted);
+  --color-peco-success: var(--peco-success);
+  --color-peco-success-light: var(--peco-success-light);
+  --color-peco-warning: var(--peco-warning);
+  --color-peco-warning-light: var(--peco-warning-light);
+  --color-peco-danger: var(--peco-danger);
+  --color-peco-danger-light: var(--peco-danger-light);
+  --color-peco-info: var(--peco-info);
+  --color-peco-info-light: var(--peco-info-light);
+  --color-peco-gray-900: var(--peco-gray-900);
+  --color-peco-gray-700: var(--peco-gray-700);
+  --color-peco-gray-500: var(--peco-gray-500);
+  --color-peco-gray-300: var(--peco-gray-300);
+  --color-peco-gray-100: var(--peco-gray-100);
+  --color-peco-gray-50: var(--peco-gray-50);
+  --radius-peco-sm: var(--peco-radius-sm);
+  --radius-peco-md: var(--peco-radius-md);
+  --radius-peco-lg: var(--peco-radius-lg);
+  --radius-peco-xl: var(--peco-radius-xl);
+  --shadow-peco-sm: var(--peco-shadow-sm);
+  --shadow-peco-md: var(--peco-shadow-md);
+  --shadow-peco-lg: var(--peco-shadow-lg);
+  --font-sans: var(--peco-font-sans);
+}
+
+@layer base {
+  html, body { height: 100%; }
+  body {
+    background: var(--peco-bg);
+    color: var(--peco-text-primary);
+    font-family: var(--peco-font-sans);
+    font-size: var(--peco-text-base);
+    -webkit-font-smoothing: antialiased;
+  }
+  *:focus-visible {
+    outline: 2px solid var(--peco-primary);
+    outline-offset: 2px;
+  }
+}
+
+.peco-fade-in { animation: peco-fade-in 160ms ease-out both; }
+.peco-modal-in { animation: peco-modal-in 200ms ease-out both; }
+.peco-toast-in { animation: peco-toast-in 220ms ease-out both; }
+.peco-spin { animation: peco-spin 0.8s linear infinite; }
+
+@keyframes peco-fade-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes peco-modal-in {
+  from { opacity: 0; transform: scale(0.96) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes peco-spin { to { transform: rotate(360deg); } }
+@keyframes peco-toast-in {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
