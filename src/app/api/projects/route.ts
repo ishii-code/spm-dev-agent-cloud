@@ -2,6 +2,12 @@ import { prisma } from "@/lib/prisma";
 import { validateProjectInput } from "@/lib/validation";
 import { getSystem } from "@/lib/systems";
 import { performStartupRecovery } from "@/lib/startup";
+import { requireApiAuth } from "@/lib/auth";
+import {
+  hasServiceKeyHeader,
+  serviceAuthErrorResponse,
+  verifyServiceKey,
+} from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 
@@ -58,6 +64,15 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  // 認証：X-Service-Key（外部サービス）OR セッション cookie（ブラウザ）のどちらか一方が通れば OK。
+  if (hasServiceKeyHeader(request)) {
+    const svc = verifyServiceKey(request);
+    if (!svc.ok) return serviceAuthErrorResponse(svc.reason);
+  } else {
+    const sessionAuth = await requireApiAuth();
+    if (!sessionAuth.ok) return sessionAuth.response;
+  }
+
   let body: unknown;
   try {
     body = await request.json();
