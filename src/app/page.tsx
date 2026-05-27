@@ -37,7 +37,6 @@ export default async function Page() {
             Phase1 MVP — Orchestrator + Agent1
           </span>
         </div>
-        <span className="text-xs text-peco-text-muted">:3005</span>
       </header>
       <ChatWorkspace
         initialProjects={projects.map((p) => {
