@@ -406,6 +406,86 @@ export async function POST(request: Request) {
         send({ type: "done", data: { sessionId } });
       };
 
+      // -------- 入力バリデーション：選択肢への回答として妥当かチェック --------
+      // 「あ」など無関係な短文で議論が進むのを防ぐ
+      const isValidAnswerToQuestions = (msg: string): boolean => {
+        const t = msg.trim();
+        if (t.length === 0) return false;
+        if (/Q\s*\d+/.test(t)) return true;
+        if (/[A-Ea-e][.．:：)）\s]/.test(t)) return true;
+        if (/^[A-Ea-e]$/.test(t)) return true;
+        if (t.length >= 5) return true;
+        return false;
+      };
+      const isValidContinuation = (msg: string): boolean => {
+        const t = msg.trim();
+        if (t.length === 0) return false;
+        if (/^[a-cA-C]([.．:：)）\s]|$)/.test(t)) return true;
+        if (/続ける|追加|作成|continue|requirement|finalize/i.test(t)) return true;
+        if (t.length >= 10) return true;
+        return false;
+      };
+
+      const trimmedForValidation = message.trim();
+
+      const sendInvalidRetry = async (
+        rePromptText: string,
+        metaPhase: string,
+      ) => {
+        send({
+          type: "text",
+          data: { agent: "orchestrator", chunk: `\n${rePromptText}\n` },
+        });
+        await prisma.message.create({
+          data: {
+            sessionId,
+            role: "orchestrator",
+            content: rePromptText,
+            agentType: "orchestrator",
+            metadata: { phase: metaPhase },
+          },
+        });
+        // status / debateContext は変更せず、同じ待機状態を維持
+        send({ type: "phase_complete", data: { phase: "debate" } });
+        send({ type: "done", data: { sessionId } });
+      };
+
+      if (ctx.awaitingContinuation && !isValidContinuation(trimmedForValidation)) {
+        console.log("[CHAT] invalid continuation input, re-prompting");
+        const continueText =
+          "選択肢から選んで回答してください（A/B/C または補足を入力）。\n\n" +
+          "続行オプション：\n" +
+          "A. このまま議論を続ける\n" +
+          "B. 追加の要件や制約を追加する\n" +
+          "C. この内容で要件定義書を作成する";
+        await sendInvalidRetry(continueText, "debate_continuation_invalid");
+        return;
+      }
+
+      if (!ctx.awaitingContinuation && !isValidAnswerToQuestions(trimmedForValidation)) {
+        console.log("[CHAT] invalid answer input, re-prompting");
+        let originalQuestionsText = "";
+        if (ctx.pendingQuestions && ctx.pendingQuestions.length > 0) {
+          const formattedQuestions = ctx.pendingQuestions
+            .map((q, i) => {
+              const t = q.trim();
+              return /^Q\d+/.test(t) ? t : `Q${i + 1}\n${t}`;
+            })
+            .join("\n\n");
+          originalQuestionsText = "ごうさんへの確認事項：\n\n" + formattedQuestions;
+        } else {
+          const lastOrch = [...previousMessages]
+            .reverse()
+            .find((m) => m.role === "orchestrator");
+          originalQuestionsText = lastOrch?.content ?? "";
+        }
+        const rePromptText =
+          "選択肢から選んで回答してください（A/B/C または補足を入力）。\n\n" +
+          originalQuestionsText;
+        await sendInvalidRetry(rePromptText, "answer_invalid");
+        return;
+      }
+
       // -------- ユーザー入力を fullHistory に反映 --------
       let currentHistory = ctx.fullHistory ?? "";
       const trimmed = message.trim();
