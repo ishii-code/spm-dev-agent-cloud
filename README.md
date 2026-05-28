@@ -64,3 +64,38 @@ npm run worker
 pm2 start npm --name claude-worker -- run worker
 pm2 save
 ```
+
+### デバッグ用 1 ライナー SQL
+
+`psql "$DATABASE_URL"` で接続して以下を実行する。
+
+```sql
+-- 全 Project の並列実行状態を確認
+SELECT id, title, "parallelStatus", "parallelRunId", "parallelDoneNotifiedAt", "archivedAt"
+FROM "Project"
+ORDER BY "updatedAt" DESC;
+
+-- 全 sprint_part Document の実行状態を確認
+SELECT id, "projectId", "partNumber", "partTitle", "executionStatus", "approvalState", "execPid"
+FROM "Document"
+WHERE type = 'sprint_part'
+ORDER BY "projectId", "partNumber";
+
+-- 特定プロジェクトの Part1 だけを waiting にリセットして再実行させる
+UPDATE "Document"
+SET "executionStatus" = 'waiting',
+    "approvalState"   = NULL,
+    "execPid"         = NULL,
+    "execStartedAt"   = NULL,
+    "execDoneFile"    = NULL,
+    "slackApprovalTs" = NULL,
+    "approvalPostedAt"= NULL,
+    "notifiedStartAt" = NULL,
+    "notifiedDoneAt"  = NULL,
+    "notifiedErrorAt" = NULL,
+    "executedAt"      = NULL,
+    "retryCount"      = 0
+WHERE "projectId" = '<PROJECT_ID>' AND "partNumber" = 1;
+```
+
+Document を waiting に戻したあと、Project の `parallelStatus` が `'done'` / `NULL` のままでも、ワーカーが毎 tick `resumeStuckProjects()` を実行して自動で `'running'` に戻すため、追加のSQLは不要（手動で戻したい場合は `UPDATE "Project" SET "parallelStatus"='running', "parallelDoneNotifiedAt"=NULL WHERE id='<PROJECT_ID>';`）。

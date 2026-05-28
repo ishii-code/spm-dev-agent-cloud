@@ -8,6 +8,7 @@ import {
   findRunnableProjects,
   processOneTick,
   recoverFromCrash,
+  resumeStuckProjects,
 } from "../lib/parallel-tick";
 
 const TICK_INTERVAL_MS = 5_000;
@@ -25,6 +26,13 @@ let shuttingDown = false;
 let currentTick: Promise<void> | null = null;
 
 async function runOneTick(): Promise<void> {
+  // 非終端 Document を持つのに parallelStatus が 'running' でない "取り残し" を自動復旧。
+  // markProjectDone 後にユーザが手動で executionStatus を waiting に戻したケースを救う。
+  await resumeStuckProjects().catch((e) => {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[ERROR] resumeStuckProjects failed:`, msg);
+  });
+
   const projects = await findRunnableProjects();
   if (projects.length === 0) {
     return;

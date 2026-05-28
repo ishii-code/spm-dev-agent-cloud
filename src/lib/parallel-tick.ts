@@ -199,6 +199,51 @@ export async function findRunnableProjects(): Promise<{ id: string }[]> {
   });
 }
 
+// 非終端パート（waiting / awaiting_approval / executing）を持つのに
+// Project.parallelStatus が 'running' 以外（'done' / null）になっている "取り残し" を
+// 'running' に戻して再びワーカーの対象にする。
+//
+// 想定するケース：
+//   - markProjectDone 後にユーザが手動で Document.executionStatus を waiting に戻した
+//   - 運用中に DB を直接編集して状態を巻き戻した
+//   - 何らかの理由で parallelStatus と Document 群の整合が崩れた
+//
+// archivedAt が立っている Project は対象外（ソフトデリートを尊重）。
+// parallelDoneNotifiedAt は同時に null へ戻し、再完了時に再度通知できるようにする。
+export async function resumeStuckProjects(): Promise<number> {
+  const stuck = await prisma.document.findMany({
+    where: {
+      type: "sprint_part",
+      executionStatus: { in: ["waiting", "awaiting_approval", "executing"] },
+      project: {
+        parallelStatus: { not: "running" },
+        archivedAt: null,
+      },
+    },
+    select: { projectId: true },
+    distinct: ["projectId"],
+  });
+  if (stuck.length === 0) return 0;
+  const ids = Array.from(new Set(stuck.map((s) => s.projectId)));
+  const updated = await prisma.project.updateMany({
+    where: {
+      id: { in: ids },
+      parallelStatus: { not: "running" },
+      archivedAt: null,
+    },
+    data: {
+      parallelStatus: "running",
+      parallelDoneNotifiedAt: null,
+    },
+  });
+  if (updated.count > 0) {
+    console.log(
+      `[TICK] ${updated.count} 件の Project を running に復旧（非終端Document検出）`,
+    );
+  }
+  return updated.count;
+}
+
 // =============================================================================
 // ready 状態の全パートを決定
 //
