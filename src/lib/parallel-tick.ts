@@ -489,23 +489,75 @@ async function processOneTickInner(projectId: string): Promise<TickResult> {
 
   // 各分類のパートをそれぞれの advance に投げる。advance 入口の atomic claim が
   // 重複処理を弾くため、ここでは ready 全件を無条件に並列起動してよい。
-  const tasks: Promise<TickResult>[] = [
+  type AdvanceJob = {
+    partId: string;
+    partNumber: number;
+    phase: "executing" | "approved" | "awaitingApproval" | "waiting";
+    run: () => Promise<TickResult>;
+  };
+  const jobs: AdvanceJob[] = [
     // D) executing → checkClaudeCode で進捗確認
-    ...ready.executing.map((p) => advanceExecuting(p, noteFor(p), threadTs)),
+    ...ready.executing.map<AdvanceJob>((p) => ({
+      partId: p.id,
+      partNumber: p.partNumber,
+      phase: "executing",
+      run: () => advanceExecuting(p, noteFor(p), threadTs),
+    })),
     // C) approved & execPid 未設定 → Claude Code 起動
-    ...ready.approved.map((p) => advanceApproved(p, noteFor(p), workingDir, threadTs)),
+    ...ready.approved.map<AdvanceJob>((p) => ({
+      partId: p.id,
+      partNumber: p.partNumber,
+      phase: "approved",
+      run: () => advanceApproved(p, noteFor(p), workingDir, threadTs),
+    })),
     // B) awaiting_approval → リアクション確認
-    ...ready.awaitingApproval.map((p) => advanceAwaitingApproval(p, noteFor(p), threadTs)),
+    ...ready.awaitingApproval.map<AdvanceJob>((p) => ({
+      partId: p.id,
+      partNumber: p.partNumber,
+      phase: "awaitingApproval",
+      run: () => advanceAwaitingApproval(p, noteFor(p), threadTs),
+    })),
     // A) waiting → 承認リクエスト送信
-    ...ready.waiting.map((p) => advanceWaiting(p, noteFor(p), threadTs)),
+    ...ready.waiting.map<AdvanceJob>((p) => ({
+      partId: p.id,
+      partNumber: p.partNumber,
+      phase: "waiting",
+      run: () => advanceWaiting(p, noteFor(p), threadTs),
+    })),
   ];
 
-  if (tasks.length === 0) return { status: "no_op", reason: "no_eligible_part" };
+  if (jobs.length === 0) return { status: "no_op", reason: "no_eligible_part" };
 
   // allSettled: 1 パートの advance が throw しても他パートの結果を握りつぶさない。
   // 各 advance は atomic claim で冪等なので、reject したパートは次 tick / 次ポーリングで
-  // 安全に再試行される。
-  const settled = await Promise.allSettled(tasks);
+  // 安全に再試行される。Part ID と phase を入口・出口でログに出して、どの分類がどの
+  // reason で止まっているかを観測可能にする（processed=0 の原因切り分け用）。
+  const settled = await Promise.allSettled(
+    jobs.map(async (j) => {
+      console.log(
+        `[TICK] part=${j.partId} partNum=${j.partNumber} phase=${j.phase} starting`,
+      );
+      try {
+        const r = await j.run();
+        const tag =
+          r.status === "advanced"
+            ? `advanced(${r.reason})`
+            : r.status === "no_op"
+              ? `no_op(${r.reason})`
+              : r.status;
+        console.log(
+          `[TICK] part=${j.partId} partNum=${j.partNumber} phase=${j.phase} -> ${tag}`,
+        );
+        return r;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(
+          `[TICK] part=${j.partId} partNum=${j.partNumber} phase=${j.phase} threw: ${msg}`,
+        );
+        throw e;
+      }
+    }),
+  );
   for (const r of settled) {
     if (r.status === "rejected") {
       console.error(`[TICK] advance rejected for ${projectId}:`, r.reason);
@@ -716,7 +768,8 @@ async function advanceApproved(
     return { status: "advanced", reason: "exec_started" };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error(`[TICK] Part${next.partNumber} 起動失敗:`, msg);
+    const stack = e instanceof Error ? (e.stack ?? "") : "";
+    console.error(`[TICK] Part${next.partNumber} 起動失敗: ${msg}\n${stack}`);
     if (threadTs) {
       await postSlackThread(
         threadTs,
@@ -731,6 +784,7 @@ async function advanceApproved(
         execStartedAt: null,
         executedAt: new Date(),
         notifiedDoneAt: new Date(),
+        executionLog: `[spawn失敗] ${msg}\n${stack}`.slice(0, MAX_LOG_CHARS),
       },
     });
     return { status: "advanced", reason: "error" };
