@@ -223,6 +223,7 @@ export async function resumeStuckProjects(): Promise<number> {
     select: { projectId: true },
     distinct: ["projectId"],
   });
+  console.log(`[TICK] resumeStuckProjects: stuck=${stuck.length}`);
   if (stuck.length === 0) return 0;
   const ids = Array.from(new Set(stuck.map((s) => s.projectId)));
   const updated = await prisma.project.updateMany({
@@ -426,17 +427,34 @@ async function markProjectDone(
 // =============================================================================
 
 export async function processOneTick(projectId: string): Promise<TickResult> {
-  const project = await prisma.project.findUnique({
-    where: { id: projectId },
-    select: {
-      id: true,
-      title: true,
-      slackThreadTs: true,
-      parallelStatus: true,
-      parallelWorkingDir: true,
-      targetSystem: true,
-    },
-  });
+  try {
+    return await processOneTickInner(projectId);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const stack = e instanceof Error ? e.stack : "";
+    console.error(`[TICK] processOneTick(${projectId}) crashed: ${msg}\n${stack ?? ""}`);
+    return { status: "no_op", reason: "exception" };
+  }
+}
+
+async function processOneTickInner(projectId: string): Promise<TickResult> {
+  const project = await prisma.project
+    .findUnique({
+      where: { id: projectId },
+      select: {
+        id: true,
+        title: true,
+        slackThreadTs: true,
+        parallelStatus: true,
+        parallelWorkingDir: true,
+        targetSystem: true,
+      },
+    })
+    .catch((e) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[TICK] findUnique(project=${projectId}) failed: ${msg}`);
+      return null;
+    });
   if (!project) return { status: "no_op", reason: "project_not_found" };
   if (project.parallelStatus !== "running") {
     return { status: "no_op", reason: "not_running" };
@@ -456,6 +474,10 @@ export async function processOneTick(projectId: string): Promise<TickResult> {
     where: { projectId, type: "sprint_part", partNumber: { not: null } },
   });
   const repo = repoBasename(project.parallelWorkingDir, project.targetSystem);
+
+  console.log(
+    `[TICK] project=${projectId} ready: waiting=${ready.waiting.length} awaitingApproval=${ready.awaitingApproval.length} approved=${ready.approved.length} executing=${ready.executing.length} total=${total}`,
+  );
 
   // 通知フォーマット用コンテキスト（改善4）。状態遷移には影響しない読み取りのみ。
   const noteFor = (p: PartRow): PartNote => ({

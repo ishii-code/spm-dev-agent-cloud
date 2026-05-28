@@ -26,34 +26,50 @@ let shuttingDown = false;
 let currentTick: Promise<void> | null = null;
 
 async function runOneTick(): Promise<void> {
+  const tickId = Date.now();
+  let errors = 0;
+  console.log(`[TICK] start tick=${tickId}`);
+
   // 非終端 Document を持つのに parallelStatus が 'running' でない "取り残し" を自動復旧。
-  // markProjectDone 後にユーザが手動で executionStatus を waiting に戻したケースを救う。
-  await resumeStuckProjects().catch((e) => {
+  let resumed = 0;
+  try {
+    resumed = await resumeStuckProjects();
+  } catch (e) {
+    errors++;
     const msg = e instanceof Error ? e.message : String(e);
-    console.error(`[ERROR] resumeStuckProjects failed:`, msg);
-  });
-
-  const projects = await findRunnableProjects();
-  if (projects.length === 0) {
-    return;
+    const stack = e instanceof Error ? e.stack : "";
+    console.error(`[ERROR] resumeStuckProjects failed: ${msg}\n${stack ?? ""}`);
   }
+  console.log(`[TICK] resumed ${resumed} stuck projects`);
 
-  const settled = await Promise.allSettled(
-    projects.map((p) => processOneTick(p.id)),
-  );
+  let projects: { id: string }[] = [];
+  try {
+    projects = await findRunnableProjects();
+  } catch (e) {
+    errors++;
+    const msg = e instanceof Error ? e.message : String(e);
+    const stack = e instanceof Error ? e.stack : "";
+    console.error(`[ERROR] findRunnableProjects failed: ${msg}\n${stack ?? ""}`);
+  }
+  console.log(`[TICK] found ${projects.length} runnable projects`);
 
   let advanced = 0;
-  for (const r of settled) {
-    if (r.status === "fulfilled") {
-      if (r.value.status === "advanced") advanced++;
-    } else {
-      console.error(`[ERROR] processOneTick rejected:`, r.reason);
+  if (projects.length > 0) {
+    const settled = await Promise.allSettled(
+      projects.map((p) => processOneTick(p.id)),
+    );
+    for (const r of settled) {
+      if (r.status === "fulfilled") {
+        if (r.value.status === "advanced") advanced++;
+      } else {
+        errors++;
+        const msg = r.reason instanceof Error ? r.reason.message : String(r.reason);
+        console.error(`[ERROR] processOneTick rejected: ${msg}`);
+      }
     }
   }
-
-  if (advanced > 0) {
-    console.log(`[TICK] processed ${advanced} parts`);
-  }
+  console.log(`[TICK] processed ${advanced} parts`);
+  console.log(`[TICK] end tick=${tickId} errors=${errors}`);
 }
 
 async function loop(): Promise<void> {
