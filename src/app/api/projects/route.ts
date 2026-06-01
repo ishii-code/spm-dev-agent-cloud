@@ -67,9 +67,15 @@ export async function POST(request: Request) {
   // 認証：X-Service-Key（外部サービス）OR セッション cookie（ブラウザ）のどちらか一方が通れば OK。
   if (hasServiceKeyHeader(request)) {
     const svc = verifyServiceKey(request);
+    console.log(
+      `[POST /api/projects] auth via X-Service-Key: ${svc.ok ? "ok" : "ng(" + svc.reason + ")"}`,
+    );
     if (!svc.ok) return serviceAuthErrorResponse(svc.reason);
   } else {
     const sessionAuth = await requireApiAuth();
+    console.log(
+      `[POST /api/projects] auth via session cookie: ${sessionAuth.ok ? "ok" : "ng"}`,
+    );
     if (!sessionAuth.ok) return sessionAuth.response;
   }
 
@@ -82,11 +88,24 @@ export async function POST(request: Request) {
 
   const result = validateProjectInput(body);
   if (!result.ok) {
+    console.warn(
+      "[POST /api/projects] validation_failed:",
+      JSON.stringify(result.errors),
+    );
     return Response.json(
       { error: "validation_failed", details: result.errors },
       { status: 400 },
     );
   }
+  console.log(
+    "[POST /api/projects] accepted:",
+    JSON.stringify({
+      title: result.value.title.slice(0, 80),
+      projectType: result.value.projectType,
+      targetSystem: result.value.targetSystem,
+      businessCategory: result.value.businessCategory,
+    }),
+  );
 
   // targetLabel が空ならシステム定義から自動補完
   let targetLabel = result.value.targetLabel;
