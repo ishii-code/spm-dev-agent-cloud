@@ -48,6 +48,15 @@ VM 上で常駐させる Claude Code 並列実行ワーカー。`parallel-tick.t
 
 #### 任意環境変数
 
+- `SLACK_APPROVAL_CHANNEL` — 共有承認チャンネル ID（既定 `C0B3D1S0LER`）。`Project.creatorSlackId` が
+  未設定のプロジェクトはこのチャンネル＋プロジェクトスレッドに承認リクエストを送る。
+- `SKIP_APPROVAL` — `true` で承認をスキップ（投稿せず即実行）。開発・テスト用の退避口。
+  未設定/`false` の場合、Slack トークンがあれば **リアクションが付くまで実行を保留**する
+  （✅ `white_check_mark` / 👍 `+1` で承認、❌ `x` でスキップ）。Slack トークン未設定時のみ
+  デッドロック回避のため自動承認になる。
+- `Project.creatorSlackId`（DB 列・API/POST `/api/projects` で受領）があると、承認リクエストは
+  共有チャンネルではなく**作成者本人の Slack DM**（`conversations.open`）に届く。
+  Bot に `im:write` スコープが必要。
 - `SPM_PROJECTS_ROOT` — ターゲットリポジトリ群の親ディレクトリ。未設定なら `os.homedir()` を
   基点にする（例: `<root>/spm-project-2`）。VM(Linux)では実行ユーザの HOME とリポジトリの
   置き場所が異なる／DB に macOS 由来の絶対パス（例: `/root/spm-project-2`）が残っていると

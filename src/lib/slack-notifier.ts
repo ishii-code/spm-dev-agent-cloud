@@ -7,6 +7,10 @@ export {
   postSlackThread,
   waitForReactionApproval,
   checkReactionOnce,
+  openDmChannel,
+  postSlackTo,
+  slackConfigured,
+  approvalChannel,
 } from "./slack-approval";
 export type { SlackApprovalResult } from "./slack-approval";
 

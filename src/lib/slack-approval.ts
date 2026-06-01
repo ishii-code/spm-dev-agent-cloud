@@ -5,9 +5,58 @@
 // Slackアプリ設定 > OAuth & Permissions で reactions:read を追加し、
 // ワークスペースに再インストールすること。
 
-const SLACK_CHANNEL = "C0B3D1S0LER";
+const SLACK_CHANNEL = process.env.SLACK_APPROVAL_CHANNEL ?? "C0B3D1S0LER";
 const SLACK_TOKEN = process.env.SLACK_BOT_TOKEN;
 const POLL_INTERVAL_MS = 5000;
+
+// Slack Bot トークンが設定済みか。未設定なら承認は自動通過（デッドロック回避）。
+export function slackConfigured(): boolean {
+  return Boolean(SLACK_TOKEN);
+}
+
+// 共有承認チャンネル（DM が使えない場合のフォールバック先）。
+export function approvalChannel(): string {
+  return SLACK_CHANNEL;
+}
+
+// 指定ユーザとの DM チャンネルを開いて channel id（D...）を返す。
+// 必要スコープ: im:write。失敗時 undefined。
+export async function openDmChannel(slackUserId: string): Promise<string | undefined> {
+  if (!SLACK_TOKEN || !slackUserId) return undefined;
+  try {
+    const res = await fetch("https://slack.com/api/conversations.open", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${SLACK_TOKEN}`,
+      },
+      body: JSON.stringify({ users: slackUserId }),
+    });
+    const data = (await res.json()) as {
+      ok: boolean;
+      channel?: { id?: string };
+      error?: string;
+    };
+    if (!data.ok) {
+      console.warn(`[SLACK] conversations.open failed for ${slackUserId}: ${data.error}`);
+      return undefined;
+    }
+    return data.channel?.id;
+  } catch (e) {
+    console.warn(`[SLACK] conversations.open error for ${slackUserId}: ${e}`);
+    return undefined;
+  }
+}
+
+// 任意のチャンネル（DM or 共有）にメッセージを投稿し ts を返す。失敗時 ""。
+export async function postSlackTo(
+  channel: string,
+  text: string,
+  threadTs?: string,
+): Promise<string> {
+  const ts = await postMessage(text, threadTs, channel);
+  return ts ?? "";
+}
 const REMINDER_INTERVAL_MS = 3_600_000;
 
 const NUMBER_EMOJI_REVERSE: Record<string, number> = {
@@ -18,7 +67,11 @@ const NUMBER_EMOJI_REVERSE: Record<string, number> = {
   five: 5,
 };
 
-async function postMessage(text: string, threadTs?: string): Promise<string | undefined> {
+async function postMessage(
+  text: string,
+  threadTs?: string,
+  channel: string = SLACK_CHANNEL,
+): Promise<string | undefined> {
   if (!SLACK_TOKEN) return undefined;
   try {
     const res = await fetch("https://slack.com/api/chat.postMessage", {
@@ -28,7 +81,7 @@ async function postMessage(text: string, threadTs?: string): Promise<string | un
         Authorization: `Bearer ${SLACK_TOKEN}`,
       },
       body: JSON.stringify({
-        channel: SLACK_CHANNEL,
+        channel,
         text,
         thread_ts: threadTs,
       }),
@@ -40,11 +93,14 @@ async function postMessage(text: string, threadTs?: string): Promise<string | un
   }
 }
 
-async function getReactions(messageTs: string): Promise<string[]> {
+async function getReactions(
+  messageTs: string,
+  channel: string = SLACK_CHANNEL,
+): Promise<string[]> {
   if (!SLACK_TOKEN) return [];
   try {
     const res = await fetch(
-      `https://slack.com/api/reactions.get?channel=${SLACK_CHANNEL}&timestamp=${encodeURIComponent(messageTs)}`,
+      `https://slack.com/api/reactions.get?channel=${encodeURIComponent(channel)}&timestamp=${encodeURIComponent(messageTs)}`,
       { headers: { Authorization: `Bearer ${SLACK_TOKEN}` } },
     );
     const data = (await res.json()) as {
@@ -63,24 +119,24 @@ export type SlackApprovalResult = "approved" | "rejected";
 
 // 「いま付いているリアクション」を 1 回だけ取得して判定する非ブロッキング関数。
 // ループ・sleep・タイムアウト待ちなし。state machine 用。
-//   - ✅（white_check_mark / heavy_check_mark）→ "approved"
+//   - ✅（white_check_mark / heavy_check_mark）/ 👍（+1 / thumbsup）→ "approved"
 //   - ❌（x / no_entry_sign）→ "rejected"
 //   - どちらも無し → "pending"
-//   - Slack 未設定 / messageTs 空 → "approved"（仕様通り）
+//   - Slack 未設定 / messageTs 空 → "approved"（デッドロック回避）
+// channel は対象メッセージの所属チャンネル（DM=D... または共有チャンネル）。
+const APPROVE_REACTIONS = ["white_check_mark", "heavy_check_mark", "+1", "thumbsup"];
+const REJECT_REACTIONS = ["x", "no_entry_sign"];
+
 export async function checkReactionOnce(
   messageTs: string,
-  threadTs?: string,
+  channel: string = SLACK_CHANNEL,
 ): Promise<"approved" | "rejected" | "pending"> {
-  void threadTs;
   if (!SLACK_TOKEN || !messageTs) return "approved";
-  const reactions = await getReactions(messageTs);
-  if (
-    reactions.includes("white_check_mark") ||
-    reactions.includes("heavy_check_mark")
-  ) {
+  const reactions = await getReactions(messageTs, channel);
+  if (reactions.some((r) => APPROVE_REACTIONS.includes(r))) {
     return "approved";
   }
-  if (reactions.includes("x") || reactions.includes("no_entry_sign")) {
+  if (reactions.some((r) => REJECT_REACTIONS.includes(r))) {
     return "rejected";
   }
   return "pending";

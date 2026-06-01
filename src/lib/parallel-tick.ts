@@ -8,9 +8,47 @@ import {
 } from "./claude-code-runner";
 import {
   checkReactionOnce,
-  notifyThread,
-  postSlackThread,
+  postSlackTo,
+  openDmChannel,
+  slackConfigured,
+  approvalChannel,
 } from "./slack-notifier";
+
+// 承認・通知の宛先。creatorSlackId があれば本人 DM（threadTs なし）、
+// なければ共有チャンネル＋プロジェクトスレッド。Slack 未設定なら null。
+export interface SlackTarget {
+  channel: string;
+  threadTs?: string;
+}
+
+async function resolveSlackTarget(project: {
+  slackThreadTs: string | null;
+  creatorSlackId: string | null;
+}): Promise<SlackTarget | null> {
+  if (!slackConfigured()) return null;
+  if (project.creatorSlackId) {
+    const dm = await openDmChannel(project.creatorSlackId);
+    if (dm) return { channel: dm };
+    console.warn(
+      `[TICK] DM open 失敗 → 共有チャンネルにフォールバック (creatorSlackId=${project.creatorSlackId})`,
+    );
+  }
+  return {
+    channel: approvalChannel(),
+    threadTs: project.slackThreadTs ?? undefined,
+  };
+}
+
+// SKIP_APPROVAL=true で承認をスキップ（開発・テスト用退避口）。
+function skipApprovalEnabled(): boolean {
+  return process.env.SKIP_APPROVAL === "true";
+}
+
+// SlackTarget 経由でメッセージ投稿（失敗は握りつぶす）。target が null なら何もしない。
+async function notifySlack(target: SlackTarget | null, text: string): Promise<string> {
+  if (!target) return "";
+  return postSlackTo(target.channel, text, target.threadTs).catch(() => "");
+}
 
 const EXEC_TIMEOUT_MS = 3 * 60 * 60 * 1000; // 3 時間
 const MAX_LOG_CHARS = 30_000;
@@ -433,7 +471,7 @@ async function hasNonTerminal(projectId: string): Promise<boolean> {
 async function markProjectDone(
   projectId: string,
   projectTitle: string,
-  threadTs?: string,
+  slack: SlackTarget | null,
 ): Promise<void> {
   // 🎉 完了通知の冪等化（複数 tick の並走で重複送信しないよう atomic claim）。
   // parallelDoneNotifiedAt IS NULL を満たす 1 tick だけが count=1 を得て通知する。
@@ -449,11 +487,7 @@ async function markProjectDone(
       errorCount === 0
         ? `🎉 *【${projectTitle}】全パート完了*`
         : `⚠️ *【${projectTitle}】完了（${errorCount}件のエラーあり）*`;
-    if (threadTs) {
-      await postSlackThread(threadTs, msg).catch(() => {});
-    } else {
-      await notifyThread(projectId, msg).catch(() => {});
-    }
+    await notifySlack(slack, msg);
   }
   await prisma.project.update({
     where: { id: projectId },
@@ -495,6 +529,7 @@ async function processOneTickInner(projectId: string): Promise<TickResult> {
         id: true,
         title: true,
         slackThreadTs: true,
+        creatorSlackId: true,
         parallelStatus: true,
         parallelWorkingDir: true,
         targetSystem: true,
@@ -510,12 +545,13 @@ async function processOneTickInner(projectId: string): Promise<TickResult> {
     return { status: "no_op", reason: "not_running" };
   }
 
-  const threadTs = project.slackThreadTs ?? undefined;
+  // 承認・通知の宛先（creatorSlackId があれば本人 DM、なければ共有チャンネル＋スレッド）。
+  const slack = await resolveSlackTarget(project);
   const workingDir = project.parallelWorkingDir ?? process.cwd();
 
   // E) 非終端パートが 0 件 → done 化（markProjectDone が atomic claim で冪等化）
   if (!(await hasNonTerminal(projectId))) {
-    await markProjectDone(projectId, project.title, threadTs);
+    await markProjectDone(projectId, project.title, slack);
     return { status: "done" };
   }
 
@@ -561,7 +597,7 @@ async function processOneTickInner(projectId: string): Promise<TickResult> {
       partNumber: p.partNumber,
       phase: "executing",
       ...snapshot(p),
-      run: () => advanceExecuting(p, noteFor(p), threadTs),
+      run: () => advanceExecuting(p, noteFor(p), slack),
     })),
     // C) approved & execPid 未設定 → Claude Code 起動
     ...ready.approved.map<AdvanceJob>((p) => ({
@@ -569,7 +605,7 @@ async function processOneTickInner(projectId: string): Promise<TickResult> {
       partNumber: p.partNumber,
       phase: "approved",
       ...snapshot(p),
-      run: () => advanceApproved(p, noteFor(p), workingDir, threadTs),
+      run: () => advanceApproved(p, noteFor(p), workingDir, slack),
     })),
     // B) awaiting_approval → リアクション確認
     ...ready.awaitingApproval.map<AdvanceJob>((p) => ({
@@ -577,7 +613,7 @@ async function processOneTickInner(projectId: string): Promise<TickResult> {
       partNumber: p.partNumber,
       phase: "awaitingApproval",
       ...snapshot(p),
-      run: () => advanceAwaitingApproval(p, noteFor(p), threadTs),
+      run: () => advanceAwaitingApproval(p, noteFor(p), slack),
     })),
     // A) waiting → 承認リクエスト送信
     ...ready.waiting.map<AdvanceJob>((p) => ({
@@ -585,7 +621,7 @@ async function processOneTickInner(projectId: string): Promise<TickResult> {
       partNumber: p.partNumber,
       phase: "waiting",
       ...snapshot(p),
-      run: () => advanceWaiting(p, noteFor(p), threadTs),
+      run: () => advanceWaiting(p, noteFor(p), slack),
     })),
   ];
 
@@ -646,7 +682,7 @@ async function processOneTickInner(projectId: string): Promise<TickResult> {
 async function advanceWaiting(
   next: PartRow,
   note: PartNote,
-  threadTs: string | undefined,
+  slack: SlackTarget | null,
 ): Promise<TickResult> {
   // atomic claim: approvalState を null/'none' → 'posting' に立てて、この承認送信を
   // 1 tick だけに限定する（executionStatus は 'waiting' のまま）。
@@ -664,8 +700,9 @@ async function advanceWaiting(
   });
   if (claimed.count === 0) return { status: "no_op", reason: "claim_lost" };
 
-  // Slack 未設定なら即 approved 直進
-  if (!threadTs) {
+  // SKIP_APPROVAL=true もしくは Slack 未設定（トークン無し）なら即 approved 直進。
+  // ※「Slack に投稿できた＝approved」ではなく、ここは“承認を要求しない”明示ケースのみ。
+  if (skipApprovalEnabled() || !slack) {
     await prisma.document.update({
       where: { id: next.id },
       data: {
@@ -680,8 +717,8 @@ async function advanceWaiting(
   const approvalText =
     `🔧 *${noteHead(note)}*${repoLine(note)}\n\n` +
     `内容: ${next.content.slice(0, 200)}${next.content.length > 200 ? "..." : ""}\n\n` +
-    `✅ で承認 / ❌ でスキップ`;
-  const approvalTs = await postSlackThread(threadTs, approvalText);
+    `✅ または 👍 で承認 / ❌ でスキップ（リアクションが付くまで待機します）`;
+  const approvalTs = await postSlackTo(slack.channel, approvalText, slack.threadTs);
   if (!approvalTs) {
     console.error(
       `[TICK] Part${next.partNumber} 承認メッセージ送信失敗。次tickで再試行`,
@@ -710,9 +747,25 @@ async function advanceWaiting(
 async function advanceAwaitingApproval(
   next: PartRow,
   note: PartNote,
-  threadTs: string | undefined,
+  slack: SlackTarget | null,
 ): Promise<TickResult> {
-  // slackApprovalTs が無ければ waiting に戻して次 tick で再送（atomic claim）
+  // SKIP_APPROVAL=true もしくは Slack 未設定なら自動承認（リアクション待ちをしない）。
+  // posted かどうかに関わらず awaiting_approval を approved にする。
+  if (skipApprovalEnabled() || !slack) {
+    const claimed = await prisma.document.updateMany({
+      where: {
+        id: next.id,
+        executionStatus: "awaiting_approval",
+        approvalState: { not: "approved" },
+      },
+      data: { approvalState: "approved" },
+    });
+    if (claimed.count === 0) return { status: "no_op", reason: "claim_lost" };
+    return { status: "advanced", reason: "approved" };
+  }
+
+  // slackApprovalTs が無い（投稿に失敗したまま awaiting_approval になった等）なら
+  // waiting に戻して次 tick で承認メッセージを再送する（atomic claim）。
   if (!next.slackApprovalTs) {
     const claimed = await prisma.document.updateMany({
       where: { id: next.id, executionStatus: "awaiting_approval" },
@@ -726,17 +779,8 @@ async function advanceAwaitingApproval(
     return { status: "advanced", reason: "approval_posted" };
   }
 
-  // Slack 未設定なら approved 扱い（approvalState='posted' → 'approved' を claim）
-  if (!threadTs) {
-    const claimed = await prisma.document.updateMany({
-      where: { id: next.id, approvalState: "posted" },
-      data: { approvalState: "approved" },
-    });
-    if (claimed.count === 0) return { status: "no_op", reason: "claim_lost" };
-    return { status: "advanced", reason: "approved" };
-  }
-
-  const reaction = await checkReactionOnce(next.slackApprovalTs, threadTs);
+  // リアクションを 1 回だけ確認。付くまでは pending=待機（自動承認しない）。
+  const reaction = await checkReactionOnce(next.slackApprovalTs, slack.channel);
 
   if (reaction === "approved") {
     // approvalState='posted' → 'approved' を atomic claim（executionStatus は据置）。
@@ -761,14 +805,11 @@ async function advanceAwaitingApproval(
       },
     });
     if (claimed.count === 0) return { status: "no_op", reason: "claim_lost" };
-    await postSlackThread(
-      threadTs,
-      `⏭️ *${noteHead(note, "スキップ")}*${repoLine(note)}`,
-    ).catch(() => {});
+    await notifySlack(slack, `⏭️ *${noteHead(note, "スキップ")}*${repoLine(note)}`);
     return { status: "advanced", reason: "skipped" };
   }
 
-  // pending: 何もしない（次ポーリングが拾う）
+  // pending: リアクション待ち（次ポーリングが拾う）。ここで承認扱いには絶対しない。
   return { status: "no_op", reason: "awaiting_reaction" };
 }
 
@@ -821,7 +862,7 @@ async function advanceApproved(
   next: PartRow,
   note: PartNote,
   workingDir: string,
-  threadTs: string | undefined,
+  slack: SlackTarget | null,
 ): Promise<TickResult> {
   // atomic claim: execPid を null → -1（センチネル）に立てて起動権を 1 tick に限定する。
   // execPid=-1 のパートは resolveAllReadyParts で approved 分類(execPid==null)から外れ、
@@ -842,11 +883,8 @@ async function advanceApproved(
   // 送信失敗時は set せず（次に approved 状態へ戻った際に再送される）。実行自体は止めない。
   if (!next.notifiedStartAt) {
     let notified = true;
-    if (threadTs) {
-      const ts = await postSlackThread(
-        threadTs,
-        `✅ *${noteHead(note, "実行開始")}*${repoLine(note)}`,
-      ).catch(() => undefined);
+    if (slack) {
+      const ts = await notifySlack(slack, `✅ *${noteHead(note, "実行開始")}*${repoLine(note)}`);
       notified = Boolean(ts);
     }
     if (notified) {
@@ -881,12 +919,10 @@ async function advanceApproved(
     const msg = e instanceof Error ? e.message : String(e);
     const stack = e instanceof Error ? (e.stack ?? "") : "";
     console.error(`[TICK] Part${next.partNumber} 起動失敗: ${msg}\n${stack}`);
-    if (threadTs) {
-      await postSlackThread(
-        threadTs,
-        `❌ *${noteHead(note, "起動失敗")}*${repoLine(note)}\n原因: ${msg.slice(0, 200)}`,
-      ).catch(() => {});
-    }
+    await notifySlack(
+      slack,
+      `❌ *${noteHead(note, "起動失敗")}*${repoLine(note)}\n原因: ${msg.slice(0, 200)}`,
+    );
     await prisma.document.update({
       where: { id: next.id },
       data: {
@@ -906,7 +942,7 @@ async function advanceApproved(
 async function advanceExecuting(
   next: PartRow,
   note: PartNote,
-  threadTs: string | undefined,
+  slack: SlackTarget | null,
 ): Promise<TickResult> {
   if (!next.execDoneFile) {
     // execDoneFile 不在＝起動時の状態欠落。再実行可能状態に戻す（atomic claim）。
@@ -928,10 +964,9 @@ async function advanceExecuting(
     return { status: "advanced", reason: "approved" };
   }
 
-  const status = checkClaudeCode({
-    pid: next.execPid,
-    doneFile: next.execDoneFile,
-  });
+  // done/log を一度に読み取り exitCode とログを取得（[RUNNER] ログを必ず出力）。
+  const inspect = await inspectExec(next.execDoneFile, next.execPid);
+  const status = inspect.status;
 
   if (status === "running") {
     // タイムアウト判定
@@ -957,34 +992,30 @@ async function advanceExecuting(
           // already dead
         }
       }
-      if (threadTs) {
-        await postSlackThread(
-          threadTs,
-          `❌ *${noteHead(note, "タイムアウト")}*${repoLine(note)}\n（3時間超のため強制終了）`,
-        ).catch(() => {});
-      }
+      await notifySlack(
+        slack,
+        `❌ *${noteHead(note, "タイムアウト")}*${repoLine(note)}\n（3時間超のため強制終了）`,
+      );
       return { status: "advanced", reason: "error" };
     }
     return { status: "no_op", reason: "still_running" };
   }
 
-  // success / failed
-  const logTail = await readLogTail(next.execDoneFile).catch(() => "");
+  // success / failed — ログは inspectExec で読み込み済み。
+  const logTail = inspect.log;
 
   if (status === "success") {
+    // exitCode=0 は必ず completed にする（ログ有無に関わらず）。
     // 完了通知の送信権を notifiedDoneAt の atomic claim で 1 tick に限定する。
     // 送信失敗時は notifiedDoneAt を null に戻し executing のまま no_op を返す
     // （doneFile が success を保持するため次 tick で再送・冪等）。
-    if (threadTs) {
+    if (slack) {
       const notifyClaim = await prisma.document.updateMany({
         where: { id: next.id, executionStatus: "executing", notifiedDoneAt: null },
         data: { notifiedDoneAt: new Date() },
       });
       if (notifyClaim.count > 0) {
-        const ts = await postSlackThread(
-          threadTs,
-          `✅ *${noteHead(note, "完了")}*${repoLine(note)}`,
-        ).catch(() => undefined);
+        const ts = await notifySlack(slack, `✅ *${noteHead(note, "完了")}*${repoLine(note)}`);
         if (!ts) {
           await prisma.document.update({
             where: { id: next.id },
@@ -995,6 +1026,7 @@ async function advanceExecuting(
       }
     }
     // executing → completed を atomic claim（通知済み・未通知いずれでも冪等に確定）。
+    // ログが非空なら必ず executionLog に保存する。
     const claimed = await prisma.document.updateMany({
       where: { id: next.id, executionStatus: "executing" },
       data: {
@@ -1005,6 +1037,9 @@ async function advanceExecuting(
       },
     });
     if (claimed.count === 0) return { status: "no_op", reason: "claim_lost" };
+    console.log(
+      `[TICK] part=${next.id} partNum=${next.partNumber} phase=executing log persisted (${inspect.logSize} bytes)`,
+    );
     return { status: "advanced", reason: "completed" };
   }
 
@@ -1021,7 +1056,7 @@ async function advanceExecuting(
     return await finalizeExecError(
       next.id,
       logTail,
-      threadTs,
+      slack,
       `💳 *${noteHead(note, "クレジット残高不足")}*${repoLine(note)}\nhttps://console.anthropic.com/settings/billing で補充してください`,
     );
   }
@@ -1046,12 +1081,10 @@ async function advanceExecuting(
       },
     });
     if (claimed.count === 0) return { status: "no_op", reason: "claim_lost" };
-    if (threadTs) {
-      await postSlackThread(
-        threadTs,
-        `🔄 *${noteHead(note, `自動リトライ (${nextRetry}/${MAX_AUTO_RETRY})`)}*${repoLine(note)}`,
-      ).catch(() => {});
-    }
+    await notifySlack(
+      slack,
+      `🔄 *${noteHead(note, `自動リトライ (${nextRetry}/${MAX_AUTO_RETRY})`)}*${repoLine(note)}`,
+    );
     return { status: "advanced", reason: "approved" };
   }
 
@@ -1060,7 +1093,7 @@ async function advanceExecuting(
   return await finalizeExecError(
     next.id,
     logTail,
-    threadTs,
+    slack,
     `❌ *${noteHead(note, "エラー")}*${repoLine(note)}${cause ? `\n原因: ${cause}` : ""}`,
   );
 }
@@ -1071,16 +1104,16 @@ async function advanceExecuting(
 async function finalizeExecError(
   docId: string,
   logTail: string,
-  threadTs: string | undefined,
+  slack: SlackTarget | null,
   message: string,
 ): Promise<TickResult> {
-  if (threadTs) {
+  if (slack) {
     const notifyClaim = await prisma.document.updateMany({
       where: { id: docId, executionStatus: "executing", notifiedErrorAt: null },
       data: { notifiedErrorAt: new Date() },
     });
     if (notifyClaim.count > 0) {
-      const ts = await postSlackThread(threadTs, message).catch(() => undefined);
+      const ts = await notifySlack(slack, message);
       if (!ts) {
         await prisma.document.update({
           where: { id: docId },
@@ -1104,19 +1137,69 @@ async function finalizeExecError(
   return { status: "advanced", reason: "error" };
 }
 
-// logFile は doneFile と同じディレクトリ・同じ uuid を持つ命名規則：
-// doneFile = /tmp/claude-done-<uuid> → logFile = /tmp/claude-log-<uuid>
-async function readLogTail(doneFile: string): Promise<string> {
+interface ExecInspect {
+  status: "running" | "success" | "failed";
+  exitCode: number | null;
+  logFile: string;
+  log: string;
+  logSize: number;
+}
+
+// doneFile / logFile を一度に読み取り、exitCode とログ本文を返す。
+// logFile は doneFile と同じ uuid を持つ命名規則：
+//   doneFile = /tmp/claude-done-<uuid> → logFile = /tmp/claude-log-<uuid>
+// 判定規則（黙って error にしない・読み取り例外もログする）：
+//   - doneFile あり: exitCode=0 → success / それ以外 → failed
+//   - doneFile なし & pid 生存 → running / pid 死亡 → failed
+// 必ず [RUNNER] ログ（runId/doneFile/logFile/exitCode/logSize）を出力する。
+async function inspectExec(doneFile: string, pid: number | null): Promise<ExecInspect> {
+  const runId = doneFile.split("claude-done-")[1] ?? doneFile;
   const logFile = doneFile.replace("/claude-done-", "/claude-log-");
+
+  let log = "";
   try {
     const content = await fsp.readFile(logFile, "utf-8");
-    if (content.length > MAX_LOG_CHARS) {
-      return content.slice(-MAX_LOG_CHARS);
+    log = content.length > MAX_LOG_CHARS ? content.slice(-MAX_LOG_CHARS) : content;
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code;
+    if (code && code !== "ENOENT") {
+      console.warn(`[RUNNER] logFile 読み取り失敗 ${logFile}: ${code}`);
     }
-    return content;
-  } catch {
-    return "";
   }
+  const logSize = Buffer.byteLength(log, "utf-8");
+
+  let exitCode: number | null = null;
+  let doneExists = false;
+  try {
+    const raw = (await fsp.readFile(doneFile, "utf-8")).trim();
+    doneExists = true;
+    const n = Number.parseInt(raw, 10);
+    exitCode = Number.isNaN(n) ? null : n;
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code;
+    if (code && code !== "ENOENT") {
+      console.warn(`[RUNNER] doneFile 読み取り失敗 ${doneFile}: ${code}`);
+    }
+  }
+
+  let status: ExecInspect["status"];
+  if (doneExists) {
+    status = exitCode === 0 ? "success" : "failed";
+  } else if (pid != null) {
+    try {
+      process.kill(pid, 0);
+      status = "running";
+    } catch {
+      status = "failed";
+    }
+  } else {
+    status = "failed";
+  }
+
+  console.log(
+    `[RUNNER] checkClaudeCode runId=${runId} doneFile=${doneFile} logFile=${logFile} exitCode=${exitCode} logSize=${logSize}`,
+  );
+  return { status, exitCode, logFile, log, logSize };
 }
 
 // =============================================================================

@@ -22,6 +22,9 @@ model Project {
   businessCategory BusinessCategory @default(uncategorized) // 事業カテゴリ（システム一覧のグルーピング用）
   orgName       OrgName?   @default(UNASSIGNED) // 組織別ビューの所属組織（D&D で変更）。enum OrgName を再利用
   slackThreadTs String?
+  // 承認通知の宛先となる作成者の Slack User ID（U...）。設定時は共有チャンネルではなく
+  // 本人 DM に承認リクエストを送る。null なら従来どおり SLACK_APPROVAL_CHANNEL に送信。
+  creatorSlackId String?
   // 並列ウォーターフォール tick 駆動状態（サーバー再起動耐性のためDBに永続化）
   parallelStatus    String?  // null / "running" / "done"
   parallelRunId     String?  // 現在 tick を保持しているランID（再起動時にクリア）

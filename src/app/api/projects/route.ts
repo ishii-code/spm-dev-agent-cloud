@@ -99,6 +99,15 @@ export async function POST(request: Request) {
     targetLabel = result.value.targetSystem;
   }
 
+  // 作成者の Slack User ID（任意）。設定されていれば承認通知を本人 DM に送る。
+  // validateProjectInput の対象外なので raw body から安全に取り出す。
+  const rawBody =
+    body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const creatorSlackId =
+    typeof rawBody.creatorSlackId === "string" && rawBody.creatorSlackId.trim().length > 0
+      ? rawBody.creatorSlackId.trim()
+      : null;
+
   const project = await prisma.project.create({
     data: {
       title: result.value.title,
@@ -108,6 +117,7 @@ export async function POST(request: Request) {
       targetLabel,
       skipRequirements: result.value.skipRequirements,
       businessCategory: result.value.businessCategory,
+      creatorSlackId,
       sessions: { create: {} },
     },
     include: {

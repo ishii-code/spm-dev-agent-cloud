@@ -1,0 +1,79 @@
+name: Deploy to Cloud Run
+
+# main push → Artifact Registry build → Cloud Run deploy。
+# 環境変数・シークレットの値そのものは Cloud Run サービスに事前設定済みであり、
+# このワークフローではイメージ差し替えのみを行う（gcloud run deploy --image）。
+# Secret Manager 連携は別途 `gcloud run services update spm-dev-agent-web --set-secrets=...` で行う。
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  GCP_PROJECT_ID: vets-biz-aigen-apps
+  GCP_REGION: asia-northeast1
+  AR_REPOSITORY: spm-dev-agent
+  IMAGE_NAME: spm-dev-agent-cloud
+  CLOUD_RUN_SERVICE: spm-dev-agent-web
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write  # OIDC 経由に切り替える場合用。現状は JSON key 認証。
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Configure docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          REGISTRY="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_REPOSITORY}/${IMAGE_NAME}"
+          echo "registry=${REGISTRY}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${REGISTRY}:${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=${REGISTRY}:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: |
+          docker build \
+            -t "${{ steps.tags.outputs.sha_tag }}" \
+            -t "${{ steps.tags.outputs.latest_tag }}" \
+            .
+
+      - name: Push image (sha + latest)
+        run: |
+          docker push "${{ steps.tags.outputs.sha_tag }}"
+          docker push "${{ steps.tags.outputs.latest_tag }}"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${CLOUD_RUN_SERVICE}" \
+            --image="${{ steps.tags.outputs.sha_tag }}" \
+            --region="${GCP_REGION}" \
+            --platform=managed \
+            --quiet
+
+      - name: Show service URL
+        run: |
+          gcloud run services describe "${CLOUD_RUN_SERVICE}" \
+            --region="${GCP_REGION}" \
+            --format='value(status.url)'
