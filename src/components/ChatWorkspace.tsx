@@ -184,12 +184,19 @@ function upsertPart(prev: PartInfo[], partNumber: number, patch: Partial<PartInf
 
 export function ChatWorkspace({
   initialProjects,
+  initialActiveProjectId,
 }: {
   initialProjects: ProjectSummary[];
+  // ディープリンク（/projects/[id]）で開いたときに最初に選択するプロジェクト。
+  // 指定が無ければ従来どおり先頭（最終更新が最新）を選ぶ。
+  initialActiveProjectId?: string;
 }) {
   const [projects, setProjects] = useState<ProjectSummary[]>(initialProjects);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(
-    initialProjects[0]?.id ?? null,
+    (initialActiveProjectId &&
+      initialProjects.some((p) => p.id === initialActiveProjectId)
+      ? initialActiveProjectId
+      : initialProjects[0]?.id) ?? null,
   );
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
