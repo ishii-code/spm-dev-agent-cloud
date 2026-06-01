@@ -77,6 +77,10 @@ export async function POST(request: Request) {
 
   const { sessionId, projectId, message } = result.value;
 
+  console.log(
+    `[ORCHESTRATOR] 受信 POST /api/chat projectId=${projectId} sessionId=${sessionId} msgLen=${message.length}`,
+  );
+
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
     include: { project: true },

@@ -1,5 +1,5 @@
-import { anthropic, MODEL } from "../anthropic";
-import { openai, OPENAI_MODEL } from "../openai";
+import { anthropic, MODEL, hasApiKey, describeAiError } from "../anthropic";
+import { openai, OPENAI_MODEL, hasOpenAiKey } from "../openai";
 
 export type Domain = "medical" | "payment" | "security" | "personal_info" | "general";
 
@@ -154,23 +154,36 @@ async function agentSpeak(
   const systemPrompt =
     agent.systemPrompt(context, discussionHistory, isFirst) + buildDomainKnowledgeBlock(domains);
 
-  const stream = anthropic.messages.stream({
-    model: MODEL,
-    max_tokens: 500,
-    system: systemPrompt,
-    messages: [{ role: "user", content: "発言してください。" }],
-  });
-
-  for await (const event of stream) {
-    if (
-      event.type === "content_block_delta" &&
-      event.delta.type === "text_delta"
-    ) {
-      opinion += event.delta.text;
-      onOutput(agentType, event.delta.text);
-    }
+  if (!hasApiKey()) {
+    throw new Error(
+      "設定エラー：ANTHROPIC_API_KEY が未設定です。Cloud Run のシークレット設定を確認してください",
+    );
   }
 
+  console.log(`[ORCHESTRATOR] Anthropic呼出 agent=${agentType} model=${MODEL}`);
+  try {
+    const stream = anthropic.messages.stream({
+      model: MODEL,
+      max_tokens: 500,
+      system: systemPrompt,
+      messages: [{ role: "user", content: "発言してください。" }],
+    });
+
+    for await (const event of stream) {
+      if (
+        event.type === "content_block_delta" &&
+        event.delta.type === "text_delta"
+      ) {
+        opinion += event.delta.text;
+        onOutput(agentType, event.delta.text);
+      }
+    }
+  } catch (e) {
+    console.error(`[ORCHESTRATOR] Anthropic呼出失敗 agent=${agentType}:`, e);
+    throw new Error(describeAiError(e));
+  }
+
+  console.log(`[ORCHESTRATOR] レスポンス agent=${agentType} len=${opinion.length}`);
   return opinion;
 }
 
@@ -419,6 +432,9 @@ export async function generateInitialInterview(
   projectType: string,
   onOutput: (agentType: string, text: string) => void,
 ): Promise<string> {
+  console.log(
+    `[ORCHESTRATOR] 受信 generateInitialInterview targetLabel=${targetLabel} projectType=${projectType} reqLen=${userRequest.length}`,
+  );
   const domains = detectDomains(userRequest, targetLabel);
   const domainNames = domains.filter((d) => d !== "general").join("・");
   if (domainNames) {
@@ -458,6 +474,14 @@ export async function generateInitialInterview(
   let interview = "";
   onOutput("orchestrator", "");
 
+  if (!hasOpenAiKey()) {
+    throw new Error(
+      "設定エラー：OPENAI_API_KEY が未設定です。Cloud Run のシークレット設定を確認してください",
+    );
+  }
+  console.log(`[ORCHESTRATOR] OpenAI呼出 model=${OPENAI_MODEL}`);
+
+  try {
   const stream = await openai.chat.completions.create({
     model: OPENAI_MODEL,
     stream: true,
@@ -495,7 +519,14 @@ C 選択肢C（最後の選択肢には「未定・その他」を含める）
       onOutput("orchestrator", text);
     }
   }
+  } catch (e) {
+    console.error("[ORCHESTRATOR] OpenAI呼出失敗:", e);
+    throw new Error(describeAiError(e));
+  }
 
+  console.log(
+    `[ORCHESTRATOR] レスポンス orchestrator(OpenAI) len=${interview.length}`,
+  );
   return interview;
 }
 
