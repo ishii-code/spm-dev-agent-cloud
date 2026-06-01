@@ -13,6 +13,14 @@ import {
 const EXEC_TIMEOUT_MS = 3 * 60 * 60 * 1000; // 3 時間
 const MAX_LOG_CHARS = 30_000;
 
+// advanceApproved が起動権を握るために execPid に立てるセンチネル値。
+// 正常時は startClaudeCodeDetached が即座に返り、同一 tick 内で実 PID（executing）
+// または error に確定するため execPid=-1 はサブ秒で消える。これが tick をまたいで
+// 残っている＝spawn 途中でワーカーがクラッシュ/強制終了した取り残し（stale claim）。
+const SPAWN_CLAIM_PID = -1;
+// stale claim とみなすまでの猶予。正常な execPid=-1 はサブ秒なので 2 分あれば十分。
+const SPAWN_CLAIM_STALE_MS = 2 * 60 * 1000;
+
 // ネットワーク起因エラーの自動リトライ
 const MAX_AUTO_RETRY = 3;
 const NETWORK_ERROR_PATTERNS: RegExp[] = [
@@ -95,6 +103,35 @@ export type TickResult =
 //        - failed/不明 → approvalState='approved' に戻し executionStatus='awaiting_approval'
 //          execPid/execStartedAt/execDoneFile をクリア → 次 tick で再実行
 //      ※「問答無用で error」は廃止。再実行可能にする
+// execPid=SPAWN_CLAIM_PID(-1) のまま取り残された "stale spawn claim" を解放する。
+// advanceApproved が起動権を握った直後にワーカーが死ぬと、executionStatus は
+// 'awaiting_approval'（executing になる前）のまま execPid=-1 が残り、
+// resolveAllReadyParts の approved 分類（execPid==null 必須）に二度と入れず spawn
+// されない。さらに awaiting_approval 分類へ落ちて advanceAwaitingApproval により
+// waiting へ巻き戻され、waiting⇄awaiting_approval を無限ループする。
+//
+// ここで execPid を null に戻すと、次 tick で approved 分類に復帰し再 spawn される。
+// approvalState='approved' / executionStatus='awaiting_approval' は維持する。
+//   staleMs=0  : 起動時復旧（残存 -1 は全て stale とみなす。並走 tick が無い前提）
+//   staleMs>0  : 稼働中の定期スイープ（execStartedAt が staleMs より古い -1 のみ）
+export async function recoverStaleSpawnClaims(staleMs: number): Promise<number> {
+  const cutoff = new Date(Date.now() - staleMs);
+  const reset = await prisma.document.updateMany({
+    where: {
+      type: "sprint_part",
+      execPid: SPAWN_CLAIM_PID,
+      OR: [{ execStartedAt: null }, { execStartedAt: { lt: cutoff } }],
+    },
+    data: { execPid: null, execStartedAt: null },
+  });
+  if (reset.count > 0) {
+    console.log(
+      `[TICK] ${reset.count} 件の stale spawn-claim (execPid=${SPAWN_CLAIM_PID}) を解放しました（再 spawn 対象に復帰）`,
+    );
+  }
+  return reset.count;
+}
+
 export async function recoverFromCrash(): Promise<void> {
   const cleared = await prisma.project.updateMany({
     where: { parallelRunId: { not: null } },
@@ -103,6 +140,9 @@ export async function recoverFromCrash(): Promise<void> {
   if (cleared.count > 0) {
     console.log(`[TICK] ${cleared.count} 件の並列実行ロックを解放しました`);
   }
+
+  // 起動時：spawn 途中で取り残された execPid=-1 を全て解放（並走 tick は未起動）。
+  await recoverStaleSpawnClaims(0);
 
   const executing = await prisma.document.findMany({
     where: {
@@ -347,6 +387,14 @@ export async function resolveAllReadyParts(projectId: string): Promise<ReadyPart
       result.executing.push(p);
       continue;
     }
+    // spawn 起動権を握った直後のセンチネル。実 PID（executing）に確定するまで
+    // どの分類にも入れない（approved を含む全 advance から除外）。tick をまたいで
+    // 残った stale claim は recoverStaleSpawnClaims が execPid=null に戻して再 spawn
+    // 対象へ復帰させる。ここで awaiting_approval/waiting 分類へ落とすと
+    // advanceAwaitingApproval が waiting へ巻き戻し無限ループになるため、明示的に除外。
+    if (p.execPid === SPAWN_CLAIM_PID) {
+      continue;
+    }
     if (p.approvalState === "approved" && p.execPid == null) {
       result.approved.push(p);
       continue;
@@ -493,14 +541,24 @@ async function processOneTickInner(projectId: string): Promise<TickResult> {
     partId: string;
     partNumber: number;
     phase: "executing" | "approved" | "awaitingApproval" | "waiting";
+    // 観測用スナップショット（毎 tick ログに出す。遷移の診断を容易にする）
+    executionStatus: string | null;
+    approvalState: string | null;
+    execPid: number | null;
     run: () => Promise<TickResult>;
   };
+  const snapshot = (p: PartRow) => ({
+    executionStatus: p.executionStatus,
+    approvalState: p.approvalState,
+    execPid: p.execPid,
+  });
   const jobs: AdvanceJob[] = [
     // D) executing → checkClaudeCode で進捗確認
     ...ready.executing.map<AdvanceJob>((p) => ({
       partId: p.id,
       partNumber: p.partNumber,
       phase: "executing",
+      ...snapshot(p),
       run: () => advanceExecuting(p, noteFor(p), threadTs),
     })),
     // C) approved & execPid 未設定 → Claude Code 起動
@@ -508,6 +566,7 @@ async function processOneTickInner(projectId: string): Promise<TickResult> {
       partId: p.id,
       partNumber: p.partNumber,
       phase: "approved",
+      ...snapshot(p),
       run: () => advanceApproved(p, noteFor(p), workingDir, threadTs),
     })),
     // B) awaiting_approval → リアクション確認
@@ -515,6 +574,7 @@ async function processOneTickInner(projectId: string): Promise<TickResult> {
       partId: p.id,
       partNumber: p.partNumber,
       phase: "awaitingApproval",
+      ...snapshot(p),
       run: () => advanceAwaitingApproval(p, noteFor(p), threadTs),
     })),
     // A) waiting → 承認リクエスト送信
@@ -522,6 +582,7 @@ async function processOneTickInner(projectId: string): Promise<TickResult> {
       partId: p.id,
       partNumber: p.partNumber,
       phase: "waiting",
+      ...snapshot(p),
       run: () => advanceWaiting(p, noteFor(p), threadTs),
     })),
   ];
@@ -535,7 +596,8 @@ async function processOneTickInner(projectId: string): Promise<TickResult> {
   const settled = await Promise.allSettled(
     jobs.map(async (j) => {
       console.log(
-        `[TICK] part=${j.partId} partNum=${j.partNumber} phase=${j.phase} starting`,
+        `[TICK] part=${j.partId} partNum=${j.partNumber} phase=${j.phase} ` +
+          `executionStatus=${j.executionStatus} approvalState=${j.approvalState} execPid=${j.execPid} starting`,
       );
       try {
         const r = await j.run();

@@ -99,3 +99,41 @@ WHERE "projectId" = '<PROJECT_ID>' AND "partNumber" = 1;
 ```
 
 Document を waiting に戻したあと、Project の `parallelStatus` が `'done'` / `NULL` のままでも、ワーカーが毎 tick `resumeStuckProjects()` を実行して自動で `'running'` に戻すため、追加のSQLは不要（手動で戻したい場合は `UPDATE "Project" SET "parallelStatus"='running', "parallelDoneNotifiedAt"=NULL WHERE id='<PROJECT_ID>';`）。
+
+### Part が waiting ⇄ approved を無限ループするとき
+
+ログに `phase=waiting -> advanced(approved)` が毎 tick 繰り返し出て、いつまでも
+`executing` に進まない場合、当該パートが **起動権センチネル `execPid = -1`** を握ったまま
+取り残されている（`advanceApproved` が spawn 権を確保した直後にワーカーが
+クラッシュ／強制終了し、`executing` にも `error` にも確定できなかった状態）。
+`execPid = -1` のパートは `approved` 分類（`execPid IS NULL` が条件）に戻れず spawn されず、
+かつ `awaiting_approval` 分類へ落ちて `waiting` に巻き戻されるため無限ループになる。
+
+まず状態を確認する（依頼で指定された 1 行 SQL）：
+
+```sql
+SELECT "executionStatus", "approvalState", "executionLog", "execPid"
+FROM "Document" WHERE id = '<DOCUMENT_ID>';
+```
+
+- `execPid = -1` かつ `executionStatus = 'awaiting_approval'` なら本ループに該当。
+
+通常は**ワーカーが自動復旧する**：
+
+- 起動時に `recoverFromCrash()` → `recoverStaleSpawnClaims(0)` が残存 `-1` を全て解放。
+- 稼働中も毎 tick `recoverStaleSpawnClaims(2分)` が `execStartedAt` の古い `-1` を解放。
+- 解放後（`execPid = NULL`）、次 tick で `approved` 分類に復帰し再 spawn される。
+
+手動で即座に解放したい場合：
+
+```sql
+-- 取り残された spawn claim を解放（再 spawn 対象に復帰）
+UPDATE "Document"
+SET "execPid" = NULL, "execStartedAt" = NULL
+WHERE "execPid" = -1 AND type = 'sprint_part';
+```
+
+> 補足: `slackThreadTs` が未設定（Slack 連携なし）のプロジェクトでは、承認ステップを
+> スキップして `approvalState='approved'` で直接 `approved` 分類に入り spawn される。
+> spawn 自体が失敗する場合は `executionLog` に `[spawn失敗] ...` が記録され
+> `executionStatus='error'` になる（こちらはループせず終了する別系統）。

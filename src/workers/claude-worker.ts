@@ -8,8 +8,13 @@ import {
   findRunnableProjects,
   processOneTick,
   recoverFromCrash,
+  recoverStaleSpawnClaims,
   resumeStuckProjects,
 } from "../lib/parallel-tick";
+
+// 起動権センチネル(execPid=-1)を握ったまま spawn 途中で死んだ取り残しを
+// 稼働中も解放する猶予（正常な execPid=-1 はサブ秒なので 2 分で十分）。
+const SPAWN_CLAIM_STALE_MS = 2 * 60 * 1000;
 
 const TICK_INTERVAL_MS = 5_000;
 
@@ -29,6 +34,17 @@ async function runOneTick(): Promise<void> {
   const tickId = Date.now();
   let errors = 0;
   console.log(`[TICK] start tick=${tickId}`);
+
+  // spawn 途中で取り残された execPid=-1（stale spawn claim）を解放して再 spawn 可能に。
+  // これを怠ると当該パートは approved 分類に戻れず waiting⇄awaiting_approval を無限ループする。
+  try {
+    await recoverStaleSpawnClaims(SPAWN_CLAIM_STALE_MS);
+  } catch (e) {
+    errors++;
+    const msg = e instanceof Error ? e.message : String(e);
+    const stack = e instanceof Error ? e.stack : "";
+    console.error(`[ERROR] recoverStaleSpawnClaims failed: ${msg}\n${stack ?? ""}`);
+  }
 
   // 非終端 Document を持つのに parallelStatus が 'running' でない "取り残し" を自動復旧。
   let resumed = 0;
