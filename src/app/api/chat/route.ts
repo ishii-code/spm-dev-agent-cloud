@@ -234,7 +234,14 @@ export async function POST(request: Request) {
     // ===================================================================
     // ケース1: 最初のメッセージ → 初期ヒアリングだけ実行して停止
     // ===================================================================
-    if (isFirstMessage) {
+    // status==="active" は「初期ヒアリングがまだ一度も成立していない」状態。
+    // 最初の送信が AI 例外で失敗すると user メッセージだけ保存され status は active の
+    // まま残り、次の送信は isFirstMessage=false でケース4（誤った「設計書完成」表示）に
+    // 落ちる。これを防ぐため、active のセッションは isFirstMessage に関わらず再ヒアリングする。
+    if (isFirstMessage || status === "active") {
+      console.log(
+        `[ORCHESTRATOR] generateInitialInterview開始 sessionId=${sessionId} isFirst=${isFirstMessage} status=${status}`,
+      );
       send({
         type: "phase_start",
         data: { phase: "initial_interview", label: "💬 全体像を把握するため確認します..." },
@@ -259,6 +266,10 @@ export async function POST(request: Request) {
           metadata: { phase: "initial_interview" },
         },
       });
+      console.log(
+        `[ORCHESTRATOR] Message保存 sessionId=${sessionId} role=orchestrator len=${interview.length}`,
+      );
+      console.log(`[ORCHESTRATOR] generateInitialInterview完了 sessionId=${sessionId}`);
 
       await prisma.session.update({
         where: { id: sessionId },
@@ -281,8 +292,8 @@ export async function POST(request: Request) {
     // ===================================================================
     // ケース2: waiting_user / initial_interview（互換） → 議論を1POST分回す
     // ===================================================================
-    if (status === "waiting_user" || status === "initial_interview") {
-      console.log("[CHAT] ENTERING waiting_user flow");
+    if (status === "waiting_user" || status === "initial_interview" || status === "debate") {
+      console.log("[CHAT] ENTERING waiting_user flow (status=" + status + ")");
       const ctx =
         readDebateCtx(session.debateContext) ??
         {
@@ -711,7 +722,33 @@ export async function POST(request: Request) {
 
     // ===================================================================
     // ケース4: その他（completed 等）
+    // ※「設計書完成」と案内してよいのは設計書(sprint)が実在する場合のみ。
+    //   ドキュメントが無いのにここへ来たのは状態不整合なので、誤誘導せず
+    //   ヒアリングからやり直す（状態を active に戻し、次送信でケース1が走る）。
     // ===================================================================
+    const designDoc = await prisma.document.findFirst({
+      where: { projectId, type: { in: ["sprint", "requirements"] } },
+      select: { id: true },
+    });
+    if (!designDoc) {
+      console.warn(
+        `[ORCHESTRATOR] ケース4 到達だがドキュメント無し（status=${status}）→ ヒアリングへ復帰`,
+      );
+      await prisma.session.update({
+        where: { id: sessionId },
+        data: { status: "active", debateContext: undefined },
+      });
+      send({
+        type: "text",
+        data: {
+          agent: "orchestrator",
+          chunk:
+            "セッションを初期化しました。もう一度、依頼内容を送信してください。Orchestratorがヒアリングを始めます。",
+        },
+      });
+      send({ type: "done", data: { sessionId } });
+      return;
+    }
     send({
       type: "text",
       data: {

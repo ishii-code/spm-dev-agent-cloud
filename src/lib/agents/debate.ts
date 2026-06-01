@@ -150,6 +150,7 @@ async function agentSpeak(
 ): Promise<string> {
   const agent = AGENTS[agentType];
   let opinion = "";
+  console.log(`[ORCHESTRATOR] agentSpeak開始 agentName=${agent.name} agentType=${agentType}`);
 
   const systemPrompt =
     agent.systemPrompt(context, discussionHistory, isFirst) + buildDomainKnowledgeBlock(domains);
