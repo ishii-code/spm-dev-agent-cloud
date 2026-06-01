@@ -1,5 +1,7 @@
-import { promises as fsp } from "fs";
+import { promises as fsp, constants as fsConstants } from "fs";
+import path from "path";
 import { prisma } from "./prisma";
+import { projectsRoot } from "./repos";
 import {
   startClaudeCodeDetached,
   checkClaudeCode,
@@ -770,6 +772,50 @@ async function advanceAwaitingApproval(
   return { status: "no_op", reason: "awaiting_reaction" };
 }
 
+// spawn 前に cwd の到達性を検証する。VM(Linux)では DB に macOS 由来の絶対パス
+// （例: /root/spm-project-2）が残っており chdir で EACCES になるため、
+//   1) 保存値が存在し R/W 可能ならそれを使う
+//   2) 不可なら SPM_PROJECTS_ROOT/<basename> にフォールバック（無ければ mkdir -p）
+//   3) いずれも不可なら明示メッセージで throw（呼び出し元の catch が executionLog に記録）
+async function ensureAccessibleCwd(stored: string): Promise<string> {
+  const tried: string[] = [];
+  const cleaned = (stored ?? "").trim();
+  const base = cleaned ? path.basename(cleaned.replace(/[/\\]+$/, "")) : "";
+  const fallback = base ? path.join(projectsRoot(), base) : "";
+
+  const candidates: string[] = [];
+  if (cleaned) candidates.push(cleaned);
+  if (fallback && fallback !== cleaned) candidates.push(fallback);
+
+  for (const dir of candidates) {
+    try {
+      await fsp.access(dir, fsConstants.R_OK | fsConstants.W_OK);
+      if (dir !== cleaned) {
+        console.log(`[TICK] cwd フォールバック: ${cleaned || "(空)"} → ${dir}`);
+      }
+      return dir;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException)?.code ?? "ERR";
+      tried.push(`${dir} (${code})`);
+    }
+  }
+
+  // どれもアクセス不可 → フォールバック先を作成して再検証
+  if (fallback) {
+    try {
+      await fsp.mkdir(fallback, { recursive: true });
+      await fsp.access(fallback, fsConstants.R_OK | fsConstants.W_OK);
+      console.log(`[TICK] cwd 作成: ${fallback}`);
+      return fallback;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException)?.code ?? "ERR";
+      tried.push(`mkdir ${fallback} (${code})`);
+    }
+  }
+
+  throw new Error(`cwdアクセス不可: ${tried.join(", ") || "(候補なし)"}`);
+}
+
 // C) approvalState='approved' & execPid未設定 → Claude Code 起動だけして即返す
 async function advanceApproved(
   next: PartRow,
@@ -812,9 +858,12 @@ async function advanceApproved(
   }
 
   try {
+    // spawn 前に cwd の存在・権限を検証し、不可なら SPM_PROJECTS_ROOT 配下へフォールバック。
+    // 解決不能なら throw → 下の catch が executionStatus='error' と executionLog に記録する。
+    const cwd = await ensureAccessibleCwd(workingDir);
     const spawned = await startClaudeCodeDetached(
       next.content,
-      workingDir,
+      cwd,
       noteHead(note),
     );
     await prisma.document.update({

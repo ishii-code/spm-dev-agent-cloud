@@ -16,6 +16,14 @@ export function isAllowedRepo(value: string): value is RepoId {
   return ALLOWED_REPOS.some((r) => r.id === value);
 }
 
+// プロジェクト群の親ディレクトリ。VM(Linux)では実行ユーザの HOME とリポジトリの
+// 置き場所が異なるため、SPM_PROJECTS_ROOT で上書き可能にする。
+// 未設定なら従来どおり os.homedir() を基点にする。
+export function projectsRoot(): string {
+  const fromEnv = process.env.SPM_PROJECTS_ROOT?.trim();
+  return fromEnv && fromEnv.length > 0 ? fromEnv : os.homedir();
+}
+
 export function repoPath(id: RepoId): string {
-  return path.join(os.homedir(), id);
+  return path.join(projectsRoot(), id);
 }

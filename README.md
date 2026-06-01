@@ -48,6 +48,19 @@ VM 上で常駐させる Claude Code 並列実行ワーカー。`parallel-tick.t
 
 #### 任意環境変数
 
+- `SPM_PROJECTS_ROOT` — ターゲットリポジトリ群の親ディレクトリ。未設定なら `os.homedir()` を
+  基点にする（例: `<root>/spm-project-2`）。VM(Linux)では実行ユーザの HOME とリポジトリの
+  置き場所が異なる／DB に macOS 由来の絶対パス（例: `/root/spm-project-2`）が残っていると
+  `spawn /bin/bash EACCES cwd=/root/spm-project-2` で失敗するため、**VM では必ず設定すること**。
+  spawn 直前に cwd の存在・R/W 権限を検証し、不可なら `SPM_PROJECTS_ROOT/<repo名>` に
+  フォールバック（無ければ `mkdir -p`）する。解決不能時は `executionLog` に
+  `[spawn失敗] cwdアクセス不可: <path> (EACCES)` を記録して当該パートを error にする。設定例:
+
+  ```ini
+  # systemd unit
+  Environment="SPM_PROJECTS_ROOT=/home/ishiitakeshi/projects"
+  ```
+
 - `CLAUDE_BIN` — `claude` バイナリの絶対パス。未設定なら `which claude`（Windows は `where`）で
   自動検出し、それも失敗した場合は spawn 時にエラーを投げる（macOS / Linux 両対応）。
   Linux VM で `claude` が標準 PATH 外（例: `/home/<user>/.npm-global/bin/claude`）にある場合は

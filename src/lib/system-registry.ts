@@ -1,5 +1,5 @@
-import os from "node:os";
 import path from "node:path";
+import { projectsRoot } from "./repos";
 
 export interface SystemRuntime {
   id: string;
@@ -23,7 +23,7 @@ export const SYSTEM_RUNTIMES: readonly SystemRuntime[] = [
     label: "SFA",
     description: "営業支援・KPI管理システム",
     port: 3001,
-    dir: path.join(os.homedir(), "spm-project-2"),
+    dir: path.join(projectsRoot(), "spm-project-2"),
     icon: "📊",
     color: "peco-info",
   },
@@ -32,7 +32,7 @@ export const SYSTEM_RUNTIMES: readonly SystemRuntime[] = [
     label: "診断支援",
     description: "誤診ゼロ・診断AIエンジン",
     port: 3000,
-    dir: path.join(os.homedir(), "spm-diagnosis"),
+    dir: path.join(projectsRoot(), "spm-diagnosis"),
     icon: "🤖",
     color: "peco-success",
   },
@@ -41,7 +41,7 @@ export const SYSTEM_RUNTIMES: readonly SystemRuntime[] = [
     label: "在庫管理 PecoStock",
     description: "在庫・発注・移動管理システム",
     port: 3002,
-    dir: path.join(os.homedir(), "peco-stock"),
+    dir: path.join(projectsRoot(), "peco-stock"),
     icon: "📦",
     color: "peco-warning",
   },
@@ -50,7 +50,7 @@ export const SYSTEM_RUNTIMES: readonly SystemRuntime[] = [
     label: "デザインシステム",
     description: "PECOデザイントークン・コンポーネント",
     port: 3003,
-    dir: path.join(os.homedir(), "peco-ui"),
+    dir: path.join(projectsRoot(), "peco-ui"),
     icon: "🎨",
     color: "peco-secondary",
   },
@@ -59,7 +59,7 @@ export const SYSTEM_RUNTIMES: readonly SystemRuntime[] = [
     label: "物件検索",
     description: "出店候補物件スコアリングシステム",
     port: 3004,
-    dir: path.join(os.homedir(), "peco-property"),
+    dir: path.join(projectsRoot(), "peco-property"),
     icon: "🏠",
     color: "peco-primary",
   },
@@ -68,7 +68,7 @@ export const SYSTEM_RUNTIMES: readonly SystemRuntime[] = [
     label: "開発エージェント",
     description: "AI駆動開発管理システム",
     port: 3005,
-    dir: path.join(os.homedir(), "spm-dev-agent"),
+    dir: path.join(projectsRoot(), "spm-dev-agent"),
     icon: "⚡",
     color: "peco-danger",
   },
