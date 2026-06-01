@@ -1,3 +1,4 @@
+import { execFileSync } from "child_process";
 import { randomUUID } from "crypto";
 import { existsSync, readFileSync } from "fs";
 import * as fs from "fs/promises";
@@ -5,7 +6,78 @@ import * as os from "os";
 import * as path from "path";
 import { waitForSlackApproval, waitForSlackChoice } from "./slack-approval";
 
-const CLAUDE_PATH = "/Users/ishiitakeshi/.npm-global/bin/claude";
+// =============================================================================
+// 実行環境の解決（macOS / Linux 両対応）
+// 旧実装は claude バイナリ・PATH・シェルを macOS 決め打ち
+// （/Users/ishiitakeshi/.npm-global/bin/claude, zsh, nohup）にしていたため、
+// Linux VM では存在せず `spawn nohup EACCES` などで起動できなかった。
+// 以下で claude バイナリ・PATH・シェルを動的に解決する。
+// =============================================================================
+
+const IS_DARWIN = process.platform === "darwin";
+
+function defaultHome(): string {
+  return process.env.HOME ?? (IS_DARWIN ? "/Users/ishiitakeshi" : "/home/ishiitakeshi");
+}
+
+// 実行時 PATH。主要 bin ディレクトリを明示的に並べ、既存の process.env.PATH も温存する。
+function runtimePath(): string {
+  const home = defaultHome();
+  const dirs = IS_DARWIN
+    ? [`${home}/.npm-global/bin`, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+    : ["/usr/local/bin", "/usr/bin", "/bin", `${home}/.npm-global/bin`];
+  const fromEnv = process.env.PATH ? process.env.PATH.split(path.delimiter) : [];
+  return Array.from(new Set([...dirs, ...fromEnv]))
+    .filter(Boolean)
+    .join(path.delimiter);
+}
+
+// 起動シェル。Linux VM に zsh が無いケースに対応して bash を使う。
+function loginShell(): string {
+  return IS_DARWIN ? "/bin/zsh" : "/bin/bash";
+}
+
+// claude バイナリの絶対パスを解決する。
+//   1) 環境変数 CLAUDE_BIN（存在チェック付き）
+//   2) which / where claude（runtimePath を使って検出）
+//   3) いずれも失敗なら明示的にエラー
+// 結果はプロセス内でキャッシュする。
+let cachedClaudeBin: string | null = null;
+function resolveClaudeBin(): string {
+  if (cachedClaudeBin) return cachedClaudeBin;
+
+  const fromEnv = process.env.CLAUDE_BIN?.trim();
+  if (fromEnv) {
+    if (!existsSync(fromEnv)) {
+      throw new Error(
+        `CLAUDE_BIN="${fromEnv}" が指すファイルが存在しません（platform=${process.platform}）`,
+      );
+    }
+    cachedClaudeBin = fromEnv;
+    return fromEnv;
+  }
+
+  try {
+    const locator = process.platform === "win32" ? "where" : "which";
+    const found = execFileSync(locator, ["claude"], {
+      encoding: "utf-8",
+      env: { ...process.env, PATH: runtimePath() },
+    })
+      .split(/\r?\n/)[0]
+      ?.trim();
+    if (found && existsSync(found)) {
+      cachedClaudeBin = found;
+      return found;
+    }
+  } catch {
+    // 検出失敗 → 下の throw へフォールスルー
+  }
+
+  throw new Error(
+    `claude バイナリを解決できません。環境変数 CLAUDE_BIN を設定するか、` +
+      `PATH（${runtimePath()}）に claude を配置してください（platform=${process.platform}）`,
+  );
+}
 
 const APPROVAL_PATTERNS = [
   /Do you want to proceed/i,
@@ -79,9 +151,10 @@ async function runWithPty(
     let isHandlingPrompt = false;
     let outputTimer: NodeJS.Timeout | null = null;
 
+    const claudeBin = resolveClaudeBin();
     const ptyProcess = pty.spawn(
-      "bash",
-      ["-c", `cat "${tmpFile}" | ${CLAUDE_PATH} --dangerously-skip-permissions`],
+      loginShell(),
+      ["-c", `cat ${shQuote(tmpFile)} | ${shQuote(claudeBin)} --dangerously-skip-permissions`],
       {
         name: "xterm-color",
         cols: 220,
@@ -89,8 +162,8 @@ async function runWithPty(
         cwd: workingDir,
         env: {
           ...process.env,
-          PATH: `/Users/ishiitakeshi/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin`,
-          HOME: process.env.HOME ?? "/Users/ishiitakeshi",
+          PATH: runtimePath(),
+          HOME: defaultHome(),
           TERM: "xterm-256color",
         } as Record<string, string>,
       },
@@ -174,22 +247,29 @@ async function runWithExec(
   const { spawn } = await import("child_process");
   let output = "";
 
+  const claudeBin = resolveClaudeBin();
+  const shell = loginShell();
   const proc = spawn(
-    "/bin/zsh",
+    shell,
     [
       "-c",
-      `source ~/.zshrc 2>/dev/null; "${CLAUDE_PATH}" --dangerously-skip-permissions < "${tmpFile}"`,
+      `${shQuote(claudeBin)} --dangerously-skip-permissions < ${shQuote(tmpFile)}`,
     ],
     {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
-        PATH: `/Users/ishiitakeshi/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`,
+        PATH: runtimePath(),
         TERM: "xterm-256color",
       },
     },
   );
+  proc.on("error", (err: Error) => {
+    onOutput(
+      `spawn失敗: shell=${shell} claudeBin=${claudeBin} PATH=${runtimePath()} :: ${err.message}`,
+    );
+  });
 
   proc.stdout?.on("data", (data: Buffer) => {
     const text = data.toString();
@@ -263,8 +343,8 @@ export type CheckClaudeCodeResult = "running" | "success" | "failed";
 // 親（Node サーバー）が再起動しても生き続ける可能性がある。
 // 完了時には doneFile に終了コードが書かれる。
 //
-// 孤児プロセス対策: zsh の argv に SPM_RUN_ID=<id> SPM_PROJECT=<projectId> を
-// 含めて起動するため `ps -eo pid,command | grep SPM_RUN_ID` で
+// 孤児プロセス対策: shell の argv 先頭に SPM_RUN_ID=<id> SPM_PROJECT=<projectId> を
+// 環境変数代入として付けて起動するため `ps -eo pid,command | grep SPM_RUN_ID` で
 // 全関連プロセスを特定可能。projectId を省略した場合は "unknown" になる。
 export async function startClaudeCodeDetached(
   prompt: string,
@@ -284,30 +364,65 @@ export async function startClaudeCodeDetached(
 
   const { spawn } = await import("child_process");
 
-  // nohup + zsh + setsid（spawn detached）で完全に切り離す。
-  // shell の先頭にマーカー（環境変数代入）を付けて ps から発見可能にする。
-  // shell の最後に `echo $? > doneFile` を実行して終了コードを書く。
+  // claude バイナリ・シェル・PATH を動的解決（macOS / Linux 両対応）。
+  // resolveClaudeBin() が解決できなければここで throw → 呼び出し元 advanceApproved の
+  // catch が executionLog にエラー詳細を保存する。
+  const claudeBin = resolveClaudeBin();
+  const shell = loginShell();
+  const execPath = runtimePath();
+
+  // detached:true（setsid 相当）で親から完全に切り離す。nohup は使わない
+  // （Linux VM で nohup が PATH に無い／実行不可だと `spawn nohup EACCES` で
+  //   親プロセスごと落ちるため、移植性の高い detached に統一）。
+  // shell コマンド先頭のマーカー（環境変数代入）で ps から発見可能。
+  // 末尾の `echo $? > doneFile` で終了コードを記録する。
   const marker = `SPM_RUN_ID=${id} SPM_PROJECT=${projectId}`;
   const shellCmd =
-    `${marker} ${shQuote(CLAUDE_PATH)} --dangerously-skip-permissions ` +
+    `${marker} ${shQuote(claudeBin)} --dangerously-skip-permissions ` +
     `< ${shQuote(promptFile)} > ${shQuote(logFile)} 2>&1; ` +
     `echo $? > ${shQuote(doneFile)}`;
 
-  const proc = spawn("nohup", ["zsh", "-c", shellCmd], {
-    cwd: workingDir,
-    detached: true,
-    stdio: "ignore",
-    env: {
-      ...process.env,
-      PATH: `/Users/ishiitakeshi/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`,
-      TERM: "xterm-256color",
-    },
+  const spawnDesc = `shell=${shell} claudeBin=${claudeBin} cwd=${workingDir} PATH=${execPath}`;
+
+  let proc: import("child_process").ChildProcess;
+  try {
+    proc = spawn(shell, ["-c", shellCmd], {
+      cwd: workingDir,
+      detached: true,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        PATH: execPath,
+        TERM: "xterm-256color",
+      },
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const detail = `[spawn失敗] ${spawnDesc}\n${msg}`;
+    console.error(`[RUNNER] ${detail}`);
+    await fs.writeFile(logFile, detail, "utf-8").catch(() => {});
+    throw new Error(detail);
+  }
+
+  // detached プロセスの非同期エラー（EACCES/ENOENT 等）で親が落ちないよう必ず捕捉する。
+  // 失敗内容を logFile に残し、doneFile に非ゼロを書いて checkClaudeCode が 'failed' を
+  // 返せるようにする（doneFile が無いと 'running' のまま無限待ちになるため）。
+  proc.on("error", (err: Error) => {
+    const detail = `[spawn失敗:async] ${spawnDesc}\n${err.message}`;
+    console.error(`[RUNNER] ${detail}`);
+    void fs.writeFile(logFile, detail, "utf-8").catch(() => {});
+    void fs.writeFile(doneFile, "127", "utf-8").catch(() => {});
   });
 
   if (typeof proc.pid !== "number") {
-    throw new Error("spawn failed: pid is undefined");
+    const detail = `[spawn失敗] pid is undefined :: ${spawnDesc}`;
+    console.error(`[RUNNER] ${detail}`);
+    await fs.writeFile(logFile, detail, "utf-8").catch(() => {});
+    throw new Error(detail);
   }
   proc.unref();
+
+  console.log(`[RUNNER] spawned claude pid=${proc.pid} ${spawnDesc}`);
 
   return { pid: proc.pid, promptFile, doneFile, logFile };
 }

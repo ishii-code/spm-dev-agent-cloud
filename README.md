@@ -46,6 +46,23 @@ VM 上で常駐させる Claude Code 並列実行ワーカー。`parallel-tick.t
 
 未設定の場合は `[ERROR] required env var ... is not set` を出力して即終了する。
 
+#### 任意環境変数
+
+- `CLAUDE_BIN` — `claude` バイナリの絶対パス。未設定なら `which claude`（Windows は `where`）で
+  自動検出し、それも失敗した場合は spawn 時にエラーを投げる（macOS / Linux 両対応）。
+  Linux VM で `claude` が標準 PATH 外（例: `/home/<user>/.npm-global/bin/claude`）にある場合は
+  本変数で明示指定する。設定例:
+
+  ```ini
+  # systemd unit
+  Environment="CLAUDE_BIN=/home/ishiitakeshi/.npm-global/bin/claude"
+  ```
+
+  解決順は ① `CLAUDE_BIN` → ② `which claude`（PATH: `/usr/local/bin:/usr/bin:/bin:$HOME/.npm-global/bin` ＋
+  既存 PATH）→ ③ 失敗ならエラー。起動シェルは macOS=`/bin/zsh`、Linux=`/bin/bash` を使う
+  （`nohup` は使わず `spawn(detached:true)` で切り離す）。spawn 失敗時は使用した
+  shell / claudeBin / PATH をログと `executionLog` に必ず記録する。
+
 ### 起動
 
 ```bash
