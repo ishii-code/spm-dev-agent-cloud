@@ -182,3 +182,18 @@ curl localhost:3001/health          # ワーカーヘルス
 - **障害対応 / デバッグ SQL / 並列実行のハマりどころ**: [docs/runbook.md](docs/runbook.md)。
 - **内部 API**: [docs/api.md](docs/api.md)。
 
+## medical-pack リソース同期（agents/skills/commands/hooks）
+
+spawn される Claude Code に `spm-medical-pack` の全リソースを参照させる（冪等・symlink）。
+
+```bash
+# Mac
+bash scripts/sync-claude-resources.sh
+
+# VM (spm-dev-agent-vm)
+gcloud compute ssh spm-dev-agent-vm --zone=asia-northeast1-b --quiet \
+  --command='cd ~/spm-dev-agent-cloud && git pull --ff-only && bash scripts/sync-claude-resources.sh'
+```
+
+詳細: [docs/medical-pack-inventory.md](docs/medical-pack-inventory.md) / [docs/skills-integration.md](docs/skills-integration.md)。
+

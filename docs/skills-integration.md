@@ -3,6 +3,11 @@
 spm-dev-agent が VM 上で spawn する Claude Code に、`spm-medical-pack` の SKILL.md
 （約230件）を参照させるための設定。
 
+> **全リソース（agents/skills/commands/legacy/hooks）の統合**は
+> `scripts/sync-claude-resources.sh` を使う（skills のみは旧 `scripts/sync-skills.sh`）。
+> リソース一覧・件数・役割は [medical-pack-inventory.md](medical-pack-inventory.md) を参照。
+> 本書は skills を中心とした検出方式の解説。
+
 ## 仕組み（重要）
 
 Claude Code のスキル検出は **`$HOME/.claude/skills/<name>/SKILL.md`** と
