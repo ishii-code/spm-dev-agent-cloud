@@ -8,6 +8,8 @@ import {
   serviceAuthErrorResponse,
   verifyServiceKey,
 } from "@/lib/api-auth";
+import { generateInitialInterview } from "@/lib/agents/debate";
+import { readSystemCode } from "@/lib/obsidian";
 
 export const runtime = "nodejs";
 
@@ -186,30 +188,61 @@ export async function POST(request: Request) {
     const sessionId = project.sessions[0]?.id;
     if (sessionId) {
       try {
-        const origin = new URL(request.url).origin;
+        // Cloud Run はコンテナ内から自分の公開 URL への self-fetch が失敗する
+        // （旧実装の fetch(origin/api/chat) は "fetch failed" になっていた）ため、
+        // /api/chat のケース1（初回ヒアリング）相当をプロセス内で直接実行する。
         console.log(
-          `[PROJECTS_API] firstMessage 指定あり → Orchestrator自動開始 projectId=${project.id} sessionId=${sessionId} len=${firstMessage.length}`,
+          `[PROJECTS_API] firstMessage 指定あり → Orchestrator自動開始(in-process) projectId=${project.id} sessionId=${sessionId} len=${firstMessage.length}`,
         );
-        const chatRes = await fetch(`${origin}/api/chat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId, projectId: project.id, message: firstMessage }),
+        // ユーザーの初回メッセージを保存
+        await prisma.message.create({
+          data: { sessionId, role: "user", content: firstMessage },
         });
-        if (chatRes.body) {
-          const reader = chatRes.body.getReader();
-          // SSE を最後まで読み切る（= 生成完了・DB 保存完了を待つ）。
-          while (true) {
-            const { done } = await reader.read();
-            if (done) break;
+        // 既存コード概要（あれば）
+        let systemCode = "";
+        if (project.targetSystem) {
+          try {
+            systemCode = await readSystemCode(project.targetSystem);
+          } catch {
+            // ignore
           }
         }
+        const targetLabelForChat = project.targetLabel ?? project.targetSystem ?? "";
+        // 初期ヒアリングを生成（SSE 不要なので onOutput は no-op）
+        const interview = await generateInitialInterview(
+          firstMessage,
+          systemCode,
+          targetLabelForChat,
+          project.projectType,
+          () => {},
+        );
+        await prisma.message.create({
+          data: {
+            sessionId,
+            role: "orchestrator",
+            content: interview,
+            agentType: "orchestrator",
+            metadata: { phase: "initial_interview" },
+          },
+        });
+        await prisma.session.update({
+          where: { id: sessionId },
+          data: {
+            status: "waiting_user",
+            debateContext: {
+              originalRequest: firstMessage,
+              phase: "initial_interview",
+              fullHistory: "",
+            },
+          },
+        });
         console.log(
-          `[PROJECTS_API] Orchestrator自動開始 完了 projectId=${project.id} chatStatus=${chatRes.status}`,
+          `[PROJECTS_API] Orchestrator自動開始 完了 projectId=${project.id} interviewLen=${interview.length}`,
         );
       } catch (e) {
         // 失敗してもプロジェクト作成自体は成功として返す（ユーザーは画面で手動送信できる）。
         console.error(
-          `[PROJECTS_API] firstMessage 自動送信失敗 projectId=${project.id}:`,
+          `[PROJECTS_API] firstMessage 自動処理失敗 projectId=${project.id}:`,
           e instanceof Error ? e.message : e,
         );
       }
