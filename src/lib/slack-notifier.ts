@@ -1,3 +1,5 @@
+import { withMention } from "./slack";
+
 const SLACK_CHANNEL = "C0B3D1S0LER";
 const SLACK_TOKEN = process.env.SLACK_BOT_TOKEN;
 
@@ -25,7 +27,7 @@ async function postSlack(text: string, threadTs?: string): Promise<string | unde
       },
       body: JSON.stringify({
         channel: SLACK_CHANNEL,
-        text,
+        text: withMention(text),
         thread_ts: threadTs,
       }),
     });
@@ -51,7 +53,7 @@ async function postSlackBlocks(
       },
       body: JSON.stringify({
         channel: SLACK_CHANNEL,
-        text: fallbackText,
+        text: withMention(fallbackText),
         blocks,
         thread_ts: threadTs,
       }),

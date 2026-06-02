@@ -5,6 +5,8 @@
 // Slackアプリ設定 > OAuth & Permissions で reactions:read を追加し、
 // ワークスペースに再インストールすること。
 
+import { withMention } from "./slack";
+
 const SLACK_CHANNEL = process.env.SLACK_APPROVAL_CHANNEL ?? "C0B3D1S0LER";
 const SLACK_TOKEN = process.env.SLACK_BOT_TOKEN;
 const POLL_INTERVAL_MS = 5000;
@@ -82,7 +84,7 @@ async function postMessage(
       },
       body: JSON.stringify({
         channel,
-        text,
+        text: withMention(text),
         thread_ts: threadTs,
       }),
     });
