@@ -174,5 +174,47 @@ export async function POST(request: Request) {
     },
   });
 
+  // firstMessage（任意）：Work Monitor 等が組み立てた詳細プロンプト。指定があれば
+  // プロジェクト画面を開く前に Orchestrator 議論を自動開始する。内部 /api/chat を
+  // 呼び、SSE を最後まで drain して Orchestrator 応答の DB 保存完了を保証してから返す
+  // （Cloud Run はレスポンス後にバックグラウンド処理が凍結され得るため同期実行する）。
+  const firstMessage =
+    typeof rawBody.firstMessage === "string" && rawBody.firstMessage.trim().length > 0
+      ? rawBody.firstMessage.trim().slice(0, 10000)
+      : null;
+  if (firstMessage) {
+    const sessionId = project.sessions[0]?.id;
+    if (sessionId) {
+      try {
+        const origin = new URL(request.url).origin;
+        console.log(
+          `[PROJECTS_API] firstMessage 指定あり → Orchestrator自動開始 projectId=${project.id} sessionId=${sessionId} len=${firstMessage.length}`,
+        );
+        const chatRes = await fetch(`${origin}/api/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId, projectId: project.id, message: firstMessage }),
+        });
+        if (chatRes.body) {
+          const reader = chatRes.body.getReader();
+          // SSE を最後まで読み切る（= 生成完了・DB 保存完了を待つ）。
+          while (true) {
+            const { done } = await reader.read();
+            if (done) break;
+          }
+        }
+        console.log(
+          `[PROJECTS_API] Orchestrator自動開始 完了 projectId=${project.id} chatStatus=${chatRes.status}`,
+        );
+      } catch (e) {
+        // 失敗してもプロジェクト作成自体は成功として返す（ユーザーは画面で手動送信できる）。
+        console.error(
+          `[PROJECTS_API] firstMessage 自動送信失敗 projectId=${project.id}:`,
+          e instanceof Error ? e.message : e,
+        );
+      }
+    }
+  }
+
   return Response.json({ project }, { status: 201 });
 }
