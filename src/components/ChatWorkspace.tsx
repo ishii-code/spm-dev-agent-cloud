@@ -489,6 +489,8 @@ export function ChatWorkspace({
         const sys = input.targetSystem ? getSystem(input.targetSystem) : null;
         const res = await fetch("/api/projects", {
           method: "POST",
+          // 同一オリジンのため cookie は既定で送信されるが、明示して意図を残す。
+          credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             title: input.title.trim(),
@@ -500,6 +502,16 @@ export function ChatWorkspace({
             businessCategory: input.businessCategory,
           }),
         });
+        console.log(`[CLIENT] /api/projects(作成) 応答 status=${res.status}`);
+        // 未ログイン（セッション切れ）は 401。ログイン画面へ誘導して戻ってこられるようにする。
+        if (res.status === 401) {
+          console.error("[CLIENT] プロジェクト作成 401 unauthorized → /login へ誘導");
+          if (typeof window !== "undefined") {
+            const next = encodeURIComponent(window.location.pathname + window.location.search);
+            window.location.href = `/login?next=${next}`;
+          }
+          return;
+        }
         if (!res.ok) {
           const detail = await res.text().catch(() => "");
           throw new Error(`プロジェクト作成失敗 (${res.status}) ${detail.slice(0, 200)}`);

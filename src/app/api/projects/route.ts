@@ -2,7 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { validateProjectInput } from "@/lib/validation";
 import { getSystem } from "@/lib/systems";
 import { performStartupRecovery } from "@/lib/startup";
-import { requireApiAuth } from "@/lib/auth";
+import { requireApiAuth, SESSION_COOKIE } from "@/lib/auth";
 import {
   hasServiceKeyHeader,
   serviceAuthErrorResponse,
@@ -65,18 +65,48 @@ export async function GET() {
 
 export async function POST(request: Request) {
   // 認証：X-Service-Key（外部サービス）OR セッション cookie（ブラウザ）のどちらか一方が通れば OK。
-  if (hasServiceKeyHeader(request)) {
+  const hasKey = hasServiceKeyHeader(request);
+  const hasSessionCookie =
+    request.headers.get("cookie")?.includes(`${SESSION_COOKIE}=`) ?? false;
+  console.log(
+    `[PROJECTS_API] POST 受信 hasServiceKey=${hasKey} hasSessionCookie=${hasSessionCookie}`,
+  );
+
+  let authed = false;
+  let authReason = "none";
+  if (hasKey) {
     const svc = verifyServiceKey(request);
-    console.log(
-      `[POST /api/projects] auth via X-Service-Key: ${svc.ok ? "ok" : "ng(" + svc.reason + ")"}`,
-    );
-    if (!svc.ok) return serviceAuthErrorResponse(svc.reason);
+    if (svc.ok) {
+      authed = true;
+      authReason = "service_key";
+    } else if (svc.reason === "server_misconfigured") {
+      // サーバ側に SERVICE_API_KEY 未設定。フォールバックで隠さず 500 を返す。
+      console.error(`[PROJECTS_API] 認証結果 reason=service_key_${svc.reason}`);
+      return serviceAuthErrorResponse(svc.reason);
+    } else {
+      // X-Service-Key が無効（不一致）でも、セッション cookie があればフォールバック。
+      authReason = `service_key_${svc.reason}`;
+      const sessionAuth = await requireApiAuth();
+      if (sessionAuth.ok) {
+        authed = true;
+        authReason = "session_fallback";
+      }
+    }
   } else {
     const sessionAuth = await requireApiAuth();
-    console.log(
-      `[POST /api/projects] auth via session cookie: ${sessionAuth.ok ? "ok" : "ng"}`,
-    );
-    if (!sessionAuth.ok) return sessionAuth.response;
+    if (sessionAuth.ok) {
+      authed = true;
+      authReason = "session";
+    } else {
+      authReason = "session_missing";
+    }
+  }
+
+  console.log(`[PROJECTS_API] 認証結果 reason=${authReason} ok=${authed}`);
+  if (!authed) {
+    const ip = request.headers.get("x-forwarded-for") ?? "unknown";
+    console.warn(`[PROJECTS_API] 失敗時 401 reason=${authReason} ip=${ip}`);
+    return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
   let body: unknown;
