@@ -181,3 +181,4 @@ curl localhost:3001/health          # ワーカーヘルス
 - **メトリック/アラート**: `scripts/setup-monitoring.sh` で Cloud Logging メトリック + アラートポリシー（Slack #monitoring）を作成。
 - **障害対応 / デバッグ SQL / 並列実行のハマりどころ**: [docs/runbook.md](docs/runbook.md)。
 - **内部 API**: [docs/api.md](docs/api.md)。
+
