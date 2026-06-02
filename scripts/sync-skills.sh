@@ -61,5 +61,6 @@ for d in "${SKILLS_SRC}"/*/; do
   fi
 done
 
-visible="$(find "${DEST}" -maxdepth 2 -name SKILL.md 2>/dev/null | wc -l | tr -d ' ')"
+# symlink 先を辿るため -L を付ける（付けないと symlink 配下の SKILL.md を数えられない）。
+visible="$(find -L "${DEST}" -maxdepth 2 -name SKILL.md 2>/dev/null | wc -l | tr -d ' ')"
 echo "[SKILLS] Loaded: ${linked} skills from ${SKILLS_SRC} (skipped ${skipped}); ${DEST} に SKILL.md ${visible} 件が参照可能"
