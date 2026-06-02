@@ -233,7 +233,9 @@ export function ChatWorkspace({
   const [isAtBottom, setIsAtBottom] = useState(true);
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
 
-  const loadProject = useCallback(async (projectId: string) => {
+  // 戻り値: 解決した sessionId（無ければ null）。sendMessage 側で
+  // activeSessionId が未設定のときの復旧に使うため返す。
+  const loadProject = useCallback(async (projectId: string): Promise<string | null> => {
     setErrorMessage(null);
     try {
       const res = await fetch(`/api/projects/${projectId}`);
@@ -242,7 +244,8 @@ export function ChatWorkspace({
       }
       const data: ProjectDetail = await res.json();
       const session = data.project.sessions[0];
-      setActiveSessionId(session?.id ?? null);
+      const resolvedSessionId = session?.id ?? null;
+      setActiveSessionId(resolvedSessionId);
       const resolvedStatus = data.currentSessionStatus ?? session?.status ?? "active";
       setSessionStatus(resolvedStatus);
       setMessages(
@@ -260,8 +263,10 @@ export function ChatWorkspace({
         ]);
         setExecutionStatus("running");
       }
+      return resolvedSessionId;
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : "読み込み失敗");
+      return null;
     }
   }, []);
 
@@ -527,7 +532,29 @@ export function ChatWorkspace({
 
   const sendMessage = useCallback(async (overrideContent?: string) => {
     const trimmed = (overrideContent ?? input).trim();
-    if (!trimmed || !activeProjectId || !activeSessionId || isSending) return;
+    // 入力なし / プロジェクト未選択 / 送信中 は正当な no-op。
+    // ※ activeSessionId はここで弾かず下で確保する（従来は null だと無言で
+    //   return し、fetch が一切発火しない＝Orchestrator 無応答の原因だった）。
+    if (!trimmed || !activeProjectId || isSending) return;
+
+    // セッション ID を確保する。未設定（取得前 / セッション欠落 / 旧データ）の場合は
+    // プロジェクトを再取得して確保を試み、それでも取れなければ画面にエラーを出す。
+    let sessionId = activeSessionId;
+    if (!sessionId) {
+      console.warn(
+        `[CLIENT] activeSessionId 未設定。プロジェクト再取得でセッション確保を試みます projectId=${activeProjectId}`,
+      );
+      sessionId = await loadProject(activeProjectId);
+    }
+    if (!sessionId) {
+      console.error(
+        `[CLIENT] セッション取得失敗。送信を中止します projectId=${activeProjectId}`,
+      );
+      setErrorMessage(
+        "セッションを取得できませんでした。ページを再読み込みしてから再度お試しください。",
+      );
+      return;
+    }
 
     // 最初のユーザー発話なら、保存済みの session storage をクリアしてリセット直後の混在を防ぐ
     const isFirstMessage =
@@ -578,17 +605,27 @@ export function ChatWorkspace({
     };
 
     try {
+      console.log(
+        `[CLIENT] /api/chat 送信開始 projectId=${activeProjectId} sessionId=${sessionId} msgLen=${trimmed.length}`,
+      );
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          sessionId: activeSessionId,
+          sessionId,
           projectId: activeProjectId,
           message: trimmed,
         }),
       });
+      console.log(`[CLIENT] /api/chat 応答 status=${res.status}`);
       if (!res.ok || !res.body) {
-        throw new Error(`送信失敗 (${res.status})`);
+        const errBody = await res.text().catch(() => "");
+        console.error(
+          `[CLIENT] /api/chat 失敗 status=${res.status} body=${errBody.slice(0, 300)}`,
+        );
+        throw new Error(
+          `送信失敗 (${res.status})${errBody ? " " + errBody.slice(0, 200) : ""}`,
+        );
       }
 
       const reader = res.body.getReader();
@@ -699,7 +736,7 @@ export function ChatWorkspace({
       setAgentStatuses(initialAgentStatuses);
       setActivePhaseBadge(null);
     }
-  }, [input, activeProjectId, activeSessionId, isSending]);
+  }, [input, activeProjectId, activeSessionId, isSending, loadProject]);
 
   const handleCancelDebate = useCallback(async () => {
     if (!activeProjectId || !activeSessionId) return;

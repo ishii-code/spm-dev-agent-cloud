@@ -15,7 +15,7 @@ export async function GET(
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
-  const project = await prisma.project.findUnique({
+  let project = await prisma.project.findUnique({
     where: { id },
     include: {
       sessions: {
@@ -30,6 +30,28 @@ export async function GET(
   });
   if (!project) {
     return Response.json({ error: "project_not_found" }, { status: 404 });
+  }
+  // セッションが 1 件も無いプロジェクト（旧データ・外部起票など）には自動でセッションを
+  // 作成する。これが無いとフロントの activeSessionId が null のままになり、
+  // チャット送信(POST /api/chat)が成立せず Orchestrator が無応答になる。
+  if (project.sessions.length === 0) {
+    await prisma.session.create({ data: { projectId: id } });
+    project = await prisma.project.findUnique({
+      where: { id },
+      include: {
+        sessions: {
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          include: {
+            messages: { orderBy: { createdAt: "asc" } },
+          },
+        },
+        documents: { orderBy: { createdAt: "desc" } },
+      },
+    });
+    if (!project) {
+      return Response.json({ error: "project_not_found" }, { status: 404 });
+    }
   }
   const approvals = await prisma.approvalRequest.findMany({
     where: { sessionId: { in: project.sessions.map((s) => s.id) } },
