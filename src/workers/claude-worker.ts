@@ -4,6 +4,8 @@
 // running 状態の全プロジェクトのステートマシンを進める常駐スクリプト。
 // VM 上で `npm run worker` として PM2 / systemd 配下で動かす想定。
 
+import { createServer } from "node:http";
+import { execFile } from "node:child_process";
 import {
   findRunnableProjects,
   processOneTick,
@@ -11,12 +13,23 @@ import {
   recoverStaleSpawnClaims,
   resumeStuckProjects,
 } from "../lib/parallel-tick";
+import { prisma } from "../lib/prisma";
 
 // 起動権センチネル(execPid=-1)を握ったまま spawn 途中で死んだ取り残しを
 // 稼働中も解放する猶予（正常な execPid=-1 はサブ秒なので 2 分で十分）。
 const SPAWN_CLAIM_STALE_MS = 2 * 60 * 1000;
 
 const TICK_INTERVAL_MS = 5_000;
+
+// ヘルスチェック用 HTTP サーバ。Cloud Monitoring Uptime Check / systemd 監視から参照。
+const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? 3001);
+const HEALTH_HOST = process.env.HEALTH_HOST ?? "0.0.0.0";
+// systemd watchdog ping 間隔。unit の WatchdogSec=60s に対し半分の周期で叩く。
+const WATCHDOG_INTERVAL_MS = 30_000;
+// 直近 tick が「新鮮」とみなせる上限。これを超えるとハング疑いで degraded 扱い。
+const TICK_FRESH_MS = 60_000;
+
+const processStartedAt = Date.now();
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -30,8 +43,14 @@ function requireEnv(name: string): string {
 let shuttingDown = false;
 let currentTick: Promise<void> | null = null;
 
+// /health で公開する直近 tick の状態。
+let lastTickStartedAt: number | null = null;
+let lastTickFinishedAt: number | null = null;
+let lastTickErrors = 0;
+
 async function runOneTick(): Promise<void> {
   const tickId = Date.now();
+  lastTickStartedAt = tickId;
   let errors = 0;
   console.log(`[TICK] start tick=${tickId}`);
 
@@ -86,6 +105,9 @@ async function runOneTick(): Promise<void> {
   }
   console.log(`[TICK] processed ${advanced} parts`);
   console.log(`[TICK] end tick=${tickId} errors=${errors}`);
+
+  lastTickFinishedAt = Date.now();
+  lastTickErrors = errors;
 }
 
 async function loop(): Promise<void> {
@@ -129,11 +151,100 @@ function setupSignalHandlers(): void {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
+async function checkDbConnected(): Promise<boolean> {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * GET /health → { status, last_tick, db_connected, ... }。
+ * status は db 接続と直近 tick の鮮度で判定し、健全=200 / 異常=503 を返す
+ * （Cloud Monitoring Uptime Check / ロードバランサのヘルスチェック前提）。
+ */
+function startHealthServer(): void {
+  const server = createServer((req, res) => {
+    if (req.method !== "GET" || !req.url || !req.url.startsWith("/health")) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    void (async () => {
+      const dbConnected = await checkDbConnected();
+      const now = Date.now();
+      const tickFresh =
+        lastTickFinishedAt !== null && now - lastTickFinishedAt < TICK_FRESH_MS;
+      // 起動直後（初回 tick 未完了）は猶予として fresh 扱い。
+      const startingUp =
+        lastTickFinishedAt === null && now - processStartedAt < TICK_FRESH_MS;
+      const healthy = dbConnected && (tickFresh || startingUp);
+      const body = {
+        status: healthy ? "ok" : "degraded",
+        last_tick:
+          lastTickFinishedAt !== null
+            ? new Date(lastTickFinishedAt).toISOString()
+            : null,
+        db_connected: dbConnected,
+        last_tick_errors: lastTickErrors,
+        shutting_down: shuttingDown,
+        uptime_s: Math.floor((now - processStartedAt) / 1000),
+      };
+      res.writeHead(healthy ? 200 : 503, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    })().catch((e) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "error", error: msg }));
+    });
+  });
+  server.on("error", (e) => {
+    console.error(`[WORKER] health server error: ${e.message}`);
+  });
+  server.listen(HEALTH_PORT, HEALTH_HOST, () => {
+    console.log(`[WORKER] health endpoint on http://${HEALTH_HOST}:${HEALTH_PORT}/health`);
+  });
+}
+
+/**
+ * systemd sd_notify。Type=notify + NotifyAccess=all の unit 配下でのみ作用する。
+ * NOTIFY_SOCKET が無い（PM2 / 手動起動）場合は no-op。Node は AF_UNIX SOCK_DGRAM を
+ * 直接扱えないため systemd-notify(1) に委譲する。systemd-notify 不在でも
+ * Restart=on-failure は機能するので致命的ではない。
+ */
+function sdNotify(state: string): void {
+  if (!process.env.NOTIFY_SOCKET) return;
+  execFile("systemd-notify", [state], (err) => {
+    if (err) {
+      console.error(`[WORKER] systemd-notify ${state} failed: ${err.message}`);
+    }
+  });
+}
+
+function startWatchdog(): void {
+  if (!process.env.NOTIFY_SOCKET) {
+    console.log("[WORKER] NOTIFY_SOCKET unset; systemd watchdog disabled");
+    return;
+  }
+  console.log(`[WORKER] systemd watchdog ping every ${WATCHDOG_INTERVAL_MS}ms`);
+  const timer = setInterval(() => {
+    // DB に到達できる間だけ keep-alive を送る。到達不能なら ping を止めて
+    // WatchdogSec 経過で systemd に再起動させる（ハング検知）。
+    void checkDbConnected().then((ok) => {
+      if (ok && !shuttingDown) sdNotify("WATCHDOG=1");
+    });
+  }, WATCHDOG_INTERVAL_MS);
+  timer.unref();
+}
+
 async function main(): Promise<void> {
   requireEnv("DATABASE_URL");
   requireEnv("ANTHROPIC_API_KEY");
 
   setupSignalHandlers();
+  startHealthServer();
 
   console.log(`[WORKER] started (tick interval=${TICK_INTERVAL_MS}ms)`);
 
@@ -143,6 +254,10 @@ async function main(): Promise<void> {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`[ERROR] recoverFromCrash failed:`, msg);
   }
+
+  // 初期化完了を systemd に通知してから watchdog ping を開始する。
+  sdNotify("READY=1");
+  startWatchdog();
 
   await loop();
 }

@@ -1,0 +1,38 @@
+name: Test
+
+# pull_request / main への push で型チェック + lint を実行する。
+# このジョブを GitHub のブランチ保護 "Require status checks to pass" に登録すると、
+# 失敗時にマージがブロックされる。
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: tsc + lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        # tsc は @/generated/prisma を参照するため型チェック前に生成が必要。
+        run: npx prisma generate
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
