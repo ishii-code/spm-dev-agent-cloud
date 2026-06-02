@@ -558,8 +558,17 @@ export async function POST(request: Request) {
       );
       send({ type: "agent_complete", data: { agentType: "debate" } });
 
-      const judgment = await orchestratorJudge(baseContext, currentHistory, domains);
-      console.log("[DEBATE] judgment:", JSON.stringify(judgment));
+      const judgment = await orchestratorJudge(baseContext, currentHistory, domains, currentRound);
+      console.log("[DEBATE] judgment:", JSON.stringify(judgment), "round:", currentRound);
+
+      // 安全網: ラウンド上限に達したら ask_user でも finalize に倒す（同じ質問のループ防止）。
+      const MAX_INTERVIEW_ROUNDS = 3;
+      if (judgment.action === "ask_user" && currentRound >= MAX_INTERVIEW_ROUNDS) {
+        console.log(`[CHAT] round cap (${currentRound}) 到達 → finalize へ強制移行`);
+        await runFinalize(currentHistory);
+        return;
+      }
+
       send({
         type: "text",
         data: {

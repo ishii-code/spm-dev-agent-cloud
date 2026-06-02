@@ -233,10 +233,11 @@ export async function orchestratorJudge(
   context: string,
   fullHistory: string,
   domains: Domain[] = ["general"],
+  round: number = 1,
 ): Promise<OrchestratorJudgment> {
   const domainNames = domains.filter((d) => d !== "general").join("・");
   const domainNote = domainNames
-    ? `\n\n以下のドメインに関連するシステムです：${domainNames}\nこれらの専門要件（セキュリティ・法規制・業界標準）が要件定義に含まれているか確認してください。\n不足している場合はcontinue_debateを選んでください。`
+    ? `\n\n関連ドメイン：${domainNames}。これらの専門要件（セキュリティ・法規制・業界標準）が議論でまだ一度も触れられていない場合のみ確認する。既に議論・回答済みなら再質問せず finalize に向かうこと。`
     : "";
 
   try {
@@ -250,7 +251,12 @@ export async function orchestratorJudge(
             `SPM開発OrchestratorとしてJSON形式のみで返答してください。\n` +
             `必ず以下の形式で返答：{"action":"continue_debate","content":"理由","questions":[]}\n` +
             `actionは continue_debate / ask_user / finalize のいずれか。\n` +
-            `第1ラウンドは必ず ask_user。全員合意のみ finalize。\n\n` +
+            `現在は第${round}ラウンドです。\n` +
+            `第1ラウンドは ask_user。\n` +
+            `【最重要】議論履歴を読み、ごうさんが既に回答した質問・論点は二度と質問しないこと。同じ趣旨の質問の繰り返しは固く禁止。\n` +
+            `ask_user は「まだ一度も聞いていない新しい重要論点」がある場合のみ選ぶ。\n` +
+            `新しい重要論点が残っていない、または第3ラウンド以降は finalize を選ぶこと。\n` +
+            `未確定（「これから確認する」等）の回答があっても、それはユーザー側TODOとして要件定義書に明記すればよく、再質問の理由にしてはならない。\n\n` +
             `questions のフォーマット（必須）：\n` +
             `各質問は必ず以下の形式の1つの文字列として出力すること：\n` +
             `Q1\n質問テキスト（1行）\nA 選択肢A\nB 選択肢B\nC 選択肢C（「未定・その他」を常に入れる）\n\n` +
