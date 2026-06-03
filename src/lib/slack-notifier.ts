@@ -3,6 +3,15 @@ import { withMention } from "./slack";
 const SLACK_CHANNEL = "C0B3D1S0LER";
 const SLACK_TOKEN = process.env.SLACK_BOT_TOKEN;
 
+// Slack メッセージ内の「確認」リンク等の公開ベースURL。
+// 既定は Cloud Run の公開URL。APP_BASE_URL env で上書き可能（独自ドメイン移行時など）。
+function appBaseUrl(): string {
+  return (
+    process.env.APP_BASE_URL?.trim() ||
+    "https://spm-dev-agent-web-842623777962.asia-northeast1.run.app"
+  );
+}
+
 export {
   waitForSlackApproval,
   waitForSlackChoice,
@@ -75,7 +84,7 @@ export async function notifyExecutionStart(
     `🚀 *【${projectTitle}】開発開始*\n` +
       `対象: \`${targetRepo}\`\n` +
       `時刻: ${new Date().toLocaleString("ja-JP")}\n` +
-      `確認: http://localhost:3005`
+      `確認: ${appBaseUrl()}`
   );
   if (ts) {
     const { prisma } = await import("./prisma");
@@ -153,7 +162,7 @@ export async function notifySecurityApproval(
           {
             type: "button",
             text: { type: "plain_text", text: "🌐 Webで確認", emoji: true },
-            url: `http://localhost:3005/approvals/${approvalId}`,
+            url: `${appBaseUrl()}/approvals/${approvalId}`,
             action_id: "view_security",
           },
         ],
