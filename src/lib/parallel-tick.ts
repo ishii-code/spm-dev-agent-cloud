@@ -2,6 +2,7 @@ import { promises as fsp, constants as fsConstants } from "fs";
 import path from "path";
 import { prisma } from "./prisma";
 import { projectsRoot } from "./repos";
+import { parseAskHuman } from "./ask-human";
 import {
   startClaudeCodeDetached,
   checkClaudeCode,
@@ -1515,28 +1516,7 @@ interface ExecInspect {
   ask: { q: string; choices: string[] } | null; // [[ASK_HUMAN]] 検出時の質問
 }
 
-// [[ASK_HUMAN]] マーカーを厳格にパースする（HITL condition2）。
-// 専用行・行頭・1行・必須キー q を持つ正しい JSON のときのみ {q, choices} を返す。
-// パース失敗 / q 欠落 / choices 非配列は null（誤検出で止めない＝通常出力扱い）。
-// 複数あれば最後のものを採用。
-function parseAskHuman(log: string): { q: string; choices: string[] } | null {
-  let found: { q: string; choices: string[] } | null = null;
-  for (const line of log.split(/\r?\n/)) {
-    const m = line.match(/^\s*\[\[ASK_HUMAN\]\]\s*(\{.*\})\s*$/);
-    if (!m) continue;
-    try {
-      const obj = JSON.parse(m[1]) as { q?: unknown; choices?: unknown };
-      if (typeof obj.q !== "string" || obj.q.trim().length === 0) continue;
-      const choices = Array.isArray(obj.choices)
-        ? obj.choices.filter((c): c is string => typeof c === "string")
-        : [];
-      found = { q: obj.q.trim(), choices };
-    } catch {
-      // JSON パース失敗は通常出力扱い
-    }
-  }
-  return found;
-}
+// parseAskHuman は ./ask-human に切り出し（純粋関数・単体テスト可）。import は冒頭参照。
 
 // doneFile / logFile を一度に読み取り、exitCode とログ本文を返す。
 // logFile は doneFile と同じ uuid を持つ命名規則：
