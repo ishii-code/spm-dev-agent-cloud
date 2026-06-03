@@ -4,19 +4,12 @@ import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { requireApiAdmin } from "@/lib/auth";
+import { generateTempPassword, tempPasswordExpiry, clientIp } from "@/lib/account-security";
+import { recordAuthAudit } from "@/lib/auth-audit";
 
 export const runtime = "nodejs";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const PW_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"; // 紛らわしい 0/O/1/l/I を除外
-
-function genTempPassword(len = 12): string {
-  let out = "";
-  for (let i = 0; i < len; i++) {
-    out += PW_CHARS[Math.floor(Math.random() * PW_CHARS.length)];
-  }
-  return out;
-}
 
 export async function GET() {
   const auth = await requireApiAdmin();
@@ -66,7 +59,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "email_taken" }, { status: 409 });
   }
 
-  const tempPassword = genTempPassword();
+  const tempPassword = generateTempPassword();
   const passwordHash = await bcrypt.hash(tempPassword, 10);
   const user = await prisma.user.create({
     data: {
@@ -75,8 +68,11 @@ export async function POST(req: Request) {
       role,
       passwordHash,
       mustChangePassword: true,
+      tempPasswordExpiresAt: tempPasswordExpiry(),
     },
     select: { id: true, email: true, name: true, role: true },
   });
+  await recordAuthAudit("temp_pw_issued", { userId: user.id, email: emailRaw, ip: clientIp(req.headers) });
+  // 仮PW平文は応答1回のみ返却（ログ/Slack には出さない）。
   return NextResponse.json({ user, tempPassword });
 }

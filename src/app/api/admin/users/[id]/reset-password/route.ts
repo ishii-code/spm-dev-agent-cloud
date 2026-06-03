@@ -3,21 +3,13 @@ import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { requireApiAdmin } from "@/lib/auth";
+import { generateTempPassword, tempPasswordExpiry, clientIp } from "@/lib/account-security";
+import { recordAuthAudit } from "@/lib/auth-audit";
 
 export const runtime = "nodejs";
 
-const PW_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
-
-function genTempPassword(len = 12): string {
-  let out = "";
-  for (let i = 0; i < len; i++) {
-    out += PW_CHARS[Math.floor(Math.random() * PW_CHARS.length)];
-  }
-  return out;
-}
-
 export async function POST(
-  _req: Request,
+  req: Request,
   ctx: { params: Promise<{ id: string }> }
 ) {
   const auth = await requireApiAdmin();
@@ -31,11 +23,17 @@ export async function POST(
   if (!user) {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
-  const tempPassword = genTempPassword();
+  const tempPassword = generateTempPassword();
   const passwordHash = await bcrypt.hash(tempPassword, 10);
   await prisma.user.update({
     where: { id },
-    data: { passwordHash, mustChangePassword: true },
+    data: {
+      passwordHash,
+      mustChangePassword: true,
+      tempPasswordExpiresAt: tempPasswordExpiry(),
+    },
   });
+  await recordAuthAudit("pw_reset", { userId: id, email: user.email, ip: clientIp(req.headers) });
+  // 仮PW平文は応答1回のみ返却（ログ/Slack には出さない）。
   return NextResponse.json({ tempPassword });
 }

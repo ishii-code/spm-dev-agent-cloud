@@ -6,6 +6,8 @@ import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { createSessionToken, getSession, setSessionCookie } from "@/lib/auth";
+import { clientIp } from "@/lib/account-security";
+import { recordAuthAudit } from "@/lib/auth-audit";
 
 export const runtime = "nodejs";
 
@@ -48,8 +50,10 @@ export async function POST(req: Request) {
     data: {
       passwordHash: await bcrypt.hash(newPassword, 10),
       mustChangePassword: false,
+      tempPasswordExpiresAt: null, // 本人変更後は恒久PW＝期限解除
     },
   });
+  await recordAuthAudit("pw_changed", { userId: user.id, email: user.email, ip: clientIp(req.headers) });
 
   const token = await createSessionToken({
     userId: updated.id,
