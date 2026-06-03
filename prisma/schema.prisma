@@ -50,6 +50,12 @@ model User {
   role                UserRole  @default(USER)
   // 仮パスワード中フラグ。新規発行/管理者リセット時に true、本人が変更すると false。
   mustChangePassword  Boolean   @default(true) @map("must_change_password")
+  // 仮パスワードの短命有効期限。発行/reset 時に now+TTL を set、本人変更時に null。
+  // mustChangePassword かつ now>これ ならログイン拒否（期限切れ）。全 nullable・後方互換。
+  tempPasswordExpiresAt DateTime? @map("temp_password_expires_at")
+  // 承認/HITL 通知でメンションするオーナーの Slack User ID（U...）。未設定なら
+  // Project.creatorSlackId → 固定 SLACK_MENTION_USER_ID にフォールバック（Phase3 で使用）。
+  slackId             String?   @map("slack_id")
   lastLoginAt         DateTime? @map("last_login_at")
   createdAt           DateTime  @default(now()) @map("created_at")
   updatedAt           DateTime  @updatedAt @map("updated_at")
@@ -63,6 +69,21 @@ model User {
 enum UserRole {
   ADMIN
   USER
+}
+
+// 認証監査ログ（append-only）。パスワード・トークンは保存しない。
+// event: login_success / login_fail / temp_pw_issued / pw_reset / pw_changed / rate_limited
+model AuthAuditLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int?     @map("user_id") // 対象ユーザ（不明時 null。FK 関係は張らず疎結合）
+  email     String                   // 試行された email
+  event     String
+  ip        String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([email])
+  @@map("auth_audit_logs")
 }
 
 enum BusinessCategory {
