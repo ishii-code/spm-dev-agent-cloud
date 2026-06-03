@@ -220,6 +220,8 @@ export function ChatWorkspace({
     | { lineCount: number; sprintCount: number; documentId: string; targetRepo: string }
   >(null);
   const [parallelParts, setParallelParts] = useState<PartInfo[]>([]);
+  // #4: 実装ボタンのゲート用。parts ポーリングで更新（scaffolding/running/done 等）。
+  const [parallelStatus, setParallelStatus] = useState<string | null>(null);
   const [sessionStatus, setSessionStatus] = useState<string>("active");
   const [activePhaseBadge, setActivePhaseBadge] = useState<{ phase: string; label: string } | null>(null);
   const [isCreateModalOpen, setCreateModalOpen] = useState(false);
@@ -384,12 +386,19 @@ export function ChatWorkspace({
       try {
         const res = await fetch(`/api/projects/${activeProjectId}/parts`);
         if (!res.ok) return;
-        const parts = (await res.json()) as Array<{
+        type PartRow = {
           partNumber: number | null;
           partTitle: string | null;
           executionStatus: string | null;
-        }>;
-        if (!alive || !Array.isArray(parts) || parts.length === 0) return;
+        };
+        // #4: parts API は {parts, parallelStatus} を返す。旧形式（配列）も後方互換で許容。
+        const body = (await res.json()) as
+          | PartRow[]
+          | { parts: PartRow[]; parallelStatus: string | null };
+        if (!alive) return;
+        const parts = Array.isArray(body) ? body : body.parts;
+        if (!Array.isArray(body)) setParallelStatus(body.parallelStatus);
+        if (!Array.isArray(parts) || parts.length === 0) return;
         setParallelParts((prev) => {
           const logsByNum = new Map(prev.map((p) => [p.partNumber, p.logs] as const));
           const titleByNum = new Map(prev.map((p) => [p.partNumber, p.title] as const));
@@ -747,6 +756,8 @@ export function ChatWorkspace({
       setIsSending(false);
       setAgentStatuses(initialAgentStatuses);
       setActivePhaseBadge(null);
+      // #4: 生成完了後にサーバ状態を再同期（documents→設計書ボタン有効化、sessionStatus→バッジ解除）。
+      if (activeProjectId) void loadProject(activeProjectId);
     }
   }, [input, activeProjectId, activeSessionId, isSending, loadProject]);
 
@@ -776,6 +787,8 @@ export function ChatWorkspace({
   const runExecute = useCallback(
     async (documentId: string, targetRepo: string, force = false) => {
       if (!activeProjectId || executingDocId) return;
+      // #4: scaffold/実行中の二重 execute を防止する再発火ガード。
+      if (["scaffolding", "scaffolding_active", "running"].includes(parallelStatus ?? "")) return;
       setExecutingDocId(documentId);
       setExecutionLog([]);
       setExecutionStatus("running");
@@ -892,14 +905,18 @@ export function ChatWorkspace({
         setExecutionStatus("error");
       } finally {
         setExecutingDocId(null);
+        // #4: 実行/並列開始の完了後にサーバ状態を再同期（parts/parallelStatus/documents）。
+        if (activeProjectId) void loadProject(activeProjectId);
       }
     },
-    [activeProjectId, executingDocId],
+    [activeProjectId, executingDocId, loadProject, parallelStatus],
   );
 
   const runParallelExecute = useCallback(
     async (documentId: string, targetRepo: string) => {
       if (!activeProjectId || executingDocId) return;
+      // #4: scaffold/実行中の二重 execute を防止する再発火ガード。
+      if (["scaffolding", "scaffolding_active", "running"].includes(parallelStatus ?? "")) return;
       setExecutingDocId(documentId);
       setExecutionLog([]);
       setExecutionStatus("running");
@@ -982,9 +999,11 @@ export function ChatWorkspace({
         setExecutionStatus("error");
       } finally {
         setExecutingDocId(null);
+        // #4: 実行/並列開始の完了後にサーバ状態を再同期（parts/parallelStatus/documents）。
+        if (activeProjectId) void loadProject(activeProjectId);
       }
     },
-    [activeProjectId, executingDocId],
+    [activeProjectId, executingDocId, loadProject, parallelStatus],
   );
 
   const latestSprintDoc = useMemo(
@@ -1447,6 +1466,7 @@ export function ChatWorkspace({
               executionExitCode={executionExitCode}
               parallelSuggestion={parallelSuggestion}
               parallelParts={parallelParts}
+              parallelStatus={parallelStatus}
               onExecute={(repo) => void runExecute(latestSprintDoc.id, repo)}
               onForceNormal={(repo) => void runExecute(latestSprintDoc.id, repo, true)}
               onRunParallel={(repo) => void runParallelExecute(latestSprintDoc.id, repo)}
@@ -2266,6 +2286,7 @@ function ExecutorPanel({
   executionExitCode,
   parallelSuggestion,
   parallelParts,
+  parallelStatus,
   onExecute,
   onForceNormal,
   onRunParallel,
@@ -2292,6 +2313,7 @@ function ExecutorPanel({
     | null
     | { lineCount: number; sprintCount: number; documentId: string; targetRepo: string };
   parallelParts: PartInfo[];
+  parallelStatus: string | null;
   onExecute: (targetRepo: string) => void;
   onForceNormal: (targetRepo: string) => void;
   onRunParallel: (targetRepo: string) => void;
@@ -2609,7 +2631,9 @@ function ExecutorPanel({
                 </>
               )}
             </div>
-            {!parallelDone && !parallelParts.some((p) => p.status === 'running') && (
+            {!parallelDone &&
+              !['scaffolding', 'scaffolding_active', 'running', 'done'].includes(parallelStatus ?? '') &&
+              !parallelParts.some((p) => p.status === 'running') && (
               <button
                 type="button"
                 onClick={() => onExecute(targetSystem!)}
@@ -2625,6 +2649,11 @@ function ExecutorPanel({
                       ? '新規作成して実装開始'
                       : 'Claude Codeで実行'}
               </button>
+            )}
+            {parallelStatus === 'scaffold_error' && (
+              <div className="text-sm text-red-600">
+                ⚠️ 準備（scaffold）に失敗しました。リトライ: <code>npm run retry-scaffold &lt;projectId&gt;</code>
+              </div>
             )}
             {!parallelDone && parallelParts.some((p) => p.status === 'running') && (
               <div className="text-sm text-peco-text-muted flex items-center gap-2">

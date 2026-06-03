@@ -35,5 +35,6 @@ export async function GET(
     fireAndForgetTick(id);
   }
 
-  return Response.json(documents);
+  // #4: ボタンゲート用に parallelStatus も返す（クライアントは旧形式=配列も後方互換で許容）。
+  return Response.json({ parts: documents, parallelStatus: project?.parallelStatus ?? null });
 }
