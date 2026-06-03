@@ -1503,6 +1503,7 @@ export function ChatWorkspace({
               parallelSuggestion={parallelSuggestion}
               parallelParts={parallelParts}
               parallelStatus={parallelStatus}
+              canWrite={canWrite}
               onExecute={(repo) => void runExecute(latestSprintDoc.id, repo)}
               onForceNormal={(repo) => void runExecute(latestSprintDoc.id, repo, true)}
               onRunParallel={(repo) => void runParallelExecute(latestSprintDoc.id, repo)}
@@ -2338,6 +2339,7 @@ function ExecutorPanel({
   onResetRequirements,
   onResetFull,
   onClearLogs,
+  canWrite = true,
 }: {
   document: DocumentEntry;
   projectId: string;
@@ -2365,6 +2367,7 @@ function ExecutorPanel({
   onResetRequirements?: () => void;
   onResetFull?: () => void;
   onClearLogs?: () => void | Promise<void>;
+  canWrite?: boolean;
 }) {
   const [localTarget, setLocalTarget] = useState("");
   const [newRepoName, setNewRepoName] = useState("");
@@ -2680,7 +2683,7 @@ function ExecutorPanel({
               <button
                 type="button"
                 onClick={() => onExecute(targetSystem!)}
-                disabled={!isSprintReady}
+                disabled={!isSprintReady || !canWrite}
                 className={`${BTN_SUCCESS} h-12 px-6 whitespace-nowrap ${
                   !isSprintReady ? 'opacity-50 cursor-not-allowed' : ''
                 }`}
@@ -2730,6 +2733,7 @@ function ExecutorPanel({
               <button
                 type="button"
                 onClick={() => onRunParallel(parallelSuggestion.targetRepo)}
+                disabled={!canWrite}
                 className={`${BTN_PRIMARY} h-9 px-3 text-sm`}
               >
                 🔀 並列実行する
@@ -2737,6 +2741,7 @@ function ExecutorPanel({
               <button
                 type="button"
                 onClick={() => onForceNormal(parallelSuggestion.targetRepo)}
+                disabled={!canWrite}
                 className={`${BTN_SECONDARY} h-9 px-3 text-sm`}
               >
                 ▶ 通常実行する
