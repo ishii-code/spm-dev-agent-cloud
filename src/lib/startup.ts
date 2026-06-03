@@ -3,6 +3,7 @@ import {
   fireAndForgetTick,
   findRunnableProjects,
   recoverFromCrash,
+  isExecHost,
 } from "./parallel-tick";
 
 const HEALTH_INTERVAL_MS = 10 * 60 * 1000; // 10 分
@@ -17,6 +18,7 @@ const EXEC_HARD_TIMEOUT_MS = 3 * 60 * 60 * 1000; // 3 時間
 //   新ステートマシンと衝突するため廃止。長時間実行は tick D-branch の
 //   3時間タイムアウトで個別に kill 判定される。
 export async function performStartupRecovery(): Promise<void> {
+  console.log(`[STARTUP] isExecHost=${isExecHost()} (orchestrator は false 期待)`);
   await recoverFromCrash();
   const runnable = await findRunnableProjects();
   if (runnable.length > 0) {
@@ -36,6 +38,8 @@ export async function performStartupRecovery(): Promise<void> {
 let healthTimer: NodeJS.Timeout | null = null;
 
 export function startOrphanHealthCheck(): void {
+  // 孤児プロセス kill は host-local（execPid が VM に属する）。実行ホスト以外では起動しない（#7）。
+  if (!isExecHost()) return;
   if (healthTimer) return; // 多重登録防止
   healthTimer = setInterval(runHealthCheck, HEALTH_INTERVAL_MS);
   console.log(

@@ -19,6 +19,15 @@ import { spawn } from "node:child_process";
 // 新規プロジェクトの scaffold 成功後に起動する VS Code（ヘッドレス VM では best-effort）。
 const CODE_PATH = "/usr/local/bin/code";
 
+// 実行ホスト（claude を実際に起動し /tmp に done-file/log・scaffold dir を持つ VM worker）か。
+// claude-worker.ts が boot 時に process.env.SPM_EXEC_HOST="1" を設定する。
+// Cloud Run orchestrator は設定しないため false。
+// host-local 状態（claude の pid・done-file・scaffold dir）に依存する遷移は実行ホストのみで行う
+// （#7: Cloud Run が VM 上の実行を自分の /tmp で誤判定し error 化するのを防ぐ）。
+export function isExecHost(): boolean {
+  return process.env.SPM_EXEC_HOST === "1";
+}
+
 // 承認・通知の宛先。creatorSlackId があれば本人 DM（threadTs なし）、
 // なければ共有チャンネル＋プロジェクトスレッド。Slack 未設定なら null。
 export interface SlackTarget {
@@ -187,6 +196,11 @@ export async function recoverFromCrash(): Promise<void> {
     console.log(`[TICK] ${cleared.count} 件の並列実行ロックを解放しました`);
   }
 
+  // 以降は host-local（execPid/done-file）検査のため実行ホスト(VM)のみ実行する。
+  // Cloud Run でこれを行うと VM 上の executing パートを自分の /tmp 視点で誤再分類する（#7）。
+  // ロック解放（上記 parallelRunId クリア）は host 非依存なので Cloud Run でも実行済み。
+  if (!isExecHost()) return;
+
   // 起動時：spawn 途中で取り残された execPid=-1 を全て解放（並走 tick は未起動）。
   await recoverStaleSpawnClaims(0);
 
@@ -292,10 +306,9 @@ export async function findRunnableProjects(): Promise<{ id: string }[]> {
 async function advanceScaffolding(
   project: { id: string; title: string; parallelWorkingDir: string | null },
   slack: SlackTarget | null,
-  allowScaffold: boolean,
 ): Promise<TickResult> {
   // Cloud Run（orchestrator / fireAndForgetTick / tick route）では scaffold しない。
-  if (!allowScaffold) return { status: "no_op", reason: "scaffold_host_only" };
+  if (!isExecHost()) return { status: "no_op", reason: "exec_host_only" };
 
   const cwd = project.parallelWorkingDir;
   if (!cwd) {
@@ -613,10 +626,9 @@ async function markProjectDone(
 
 export async function processOneTick(
   projectId: string,
-  opts: { allowScaffold?: boolean } = {},
 ): Promise<TickResult> {
   try {
-    return await processOneTickInner(projectId, opts);
+    return await processOneTickInner(projectId);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const stack = e instanceof Error ? e.stack : "";
@@ -627,7 +639,6 @@ export async function processOneTick(
 
 async function processOneTickInner(
   projectId: string,
-  opts: { allowScaffold?: boolean },
 ): Promise<TickResult> {
   const project = await prisma.project
     .findUnique({
@@ -653,9 +664,9 @@ async function processOneTickInner(
   const slack = await resolveSlackTarget(project);
 
   // 新規プロジェクトの scaffold ステップ（VM worker 限定）。
-  // Cloud Run の fireAndForgetTick / tick route は allowScaffold=false で no_op になる。
+  // Cloud Run の fireAndForgetTick / tick route は isExecHost()=false で no_op になる。
   if (project.parallelStatus === "scaffolding") {
-    return await advanceScaffolding(project, slack, opts.allowScaffold ?? false);
+    return await advanceScaffolding(project, slack);
   }
   if (project.parallelStatus !== "running") {
     return { status: "no_op", reason: "not_running" };
@@ -978,6 +989,8 @@ async function advanceApproved(
   workingDir: string,
   slack: SlackTarget | null,
 ): Promise<TickResult> {
+  // claude 起動は host-local（生成物・pid が VM に属する）。実行ホスト以外では起動しない（#7）。
+  if (!isExecHost()) return { status: "no_op", reason: "exec_host_only" };
   // atomic claim: execPid を null → -1（センチネル）に立てて起動権を 1 tick に限定する。
   // execPid=-1 のパートは resolveAllReadyParts で approved 分類(execPid==null)から外れ、
   // executionStatus は据置（awaiting_approval だが approvalState='approved' なので
@@ -1058,6 +1071,8 @@ async function advanceExecuting(
   note: PartNote,
   slack: SlackTarget | null,
 ): Promise<TickResult> {
+  // pid/done-file の検査は host-local。実行ホスト以外では判定しない（#7: 誤 error 化防止）。
+  if (!isExecHost()) return { status: "no_op", reason: "exec_host_only" };
   if (!next.execDoneFile) {
     // execDoneFile 不在＝起動時の状態欠落。再実行可能状態に戻す（atomic claim）。
     // 通常フローでは spawn が executionStatus='executing' と execDoneFile を同時に

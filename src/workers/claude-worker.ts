@@ -12,8 +12,16 @@ import {
   recoverFromCrash,
   recoverStaleSpawnClaims,
   resumeStuckProjects,
+  isExecHost,
 } from "../lib/parallel-tick";
 import { prisma } from "../lib/prisma";
+
+// この worker が「実行ホスト」。claude 起動・pid/done-file 検査・scaffold など
+// host-local な exec 操作は SPM_EXEC_HOST=1 のプロセスでのみ許可される（#7）。
+// Cloud Run orchestrator はこれを設定しないため、VM 上の実行を誤判定しない。
+// isExecHost() は呼び出し時に env を読むため、ここで set すれば poll ループより必ず先行する。
+process.env.SPM_EXEC_HOST = "1";
+console.log(`[WORKER] SPM_EXEC_HOST set; isExecHost()=${isExecHost()}`);
 
 // 起動権センチネル(execPid=-1)を握ったまま spawn 途中で死んだ取り残しを
 // 稼働中も解放する猶予（正常な execPid=-1 はサブ秒なので 2 分で十分）。
@@ -91,9 +99,8 @@ async function runOneTick(): Promise<void> {
   let advanced = 0;
   if (projects.length > 0) {
     const settled = await Promise.allSettled(
-      // allowScaffold=true は VM worker のこのポーリングのみ。Cloud Run の
-      // fireAndForgetTick / tick route は false のまま（scaffold は VM 限定）。
-      projects.map((p) => processOneTick(p.id, { allowScaffold: true })),
+      // 実行ホスト(VM)の唯一のドライバ。host-local exec は isExecHost() でゲートされる。
+      projects.map((p) => processOneTick(p.id)),
     );
     for (const r of settled) {
       if (r.status === "fulfilled") {
