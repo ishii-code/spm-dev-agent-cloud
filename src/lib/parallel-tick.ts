@@ -341,13 +341,21 @@ async function advanceScaffolding(
     return { status: "no_op", reason: "scaffold_failed" };
   }
 
-  // scaffold 成功 → VS Code 起動は best-effort（ヘッドレス VM では失敗しうるが遷移をブロックしない）。
+  // scaffold 成功 → VS Code 起動は best-effort（ヘッドレス VM では code 不在で失敗しうる）。
+  // spawn の ENOENT は非同期 'error' イベントで来るため、必ず listener を付けて握りつぶす。
+  // （未処理だと worker プロセスがクラッシュし、scaffolding_active のまま取り残される）
   try {
-    spawn(CODE_PATH, [cwd], {
+    const codeProc = spawn(CODE_PATH, [cwd], {
       detached: true,
       stdio: "ignore",
       env: { ...process.env },
-    }).unref();
+    });
+    codeProc.on("error", (err) => {
+      console.warn(
+        `[TICK] VS Code 起動失敗(best-effort, 無視) project=${project.id}: ${err instanceof Error ? err.message : err}`,
+      );
+    });
+    codeProc.unref();
   } catch (e) {
     console.warn(
       `[TICK] VS Code 起動失敗(best-effort, 無視) project=${project.id}: ${e instanceof Error ? e.message : e}`,
