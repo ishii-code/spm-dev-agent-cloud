@@ -1357,6 +1357,12 @@ async function advanceExecuting(
         humanAnswer: null,
         humanAskedAt: null,
         humanRenotifiedAt: null,
+        // 質問した claude プロセスは [[ASK_HUMAN]] 出力後に exit 済み。stale な
+        // execPid/doneFile を残すと advanceWaitingForHuman の再spawn claim
+        // (execPid=null 条件) が回答到着後に弾かれ、永久に再開しない。ここでクリアする。
+        execPid: null,
+        execStartedAt: null,
+        execDoneFile: null,
       },
     });
     if (claimed.count === 0) return { status: "no_op", reason: "claim_lost" };
