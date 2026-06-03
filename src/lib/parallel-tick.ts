@@ -86,6 +86,36 @@ const NETWORK_ERROR_PATTERNS: RegExp[] = [
 ];
 const CREDIT_ERROR_PATTERN = /Credit balance is too low/i;
 
+// HITL（実行中の人間判断）誘導プロンプト。並列パスの spawn でのみ前置する
+// （非並列パスは [[ASK_HUMAN]] を解釈しないため永久待ちになる。グローバル注入は禁止）。
+// マーカー構文は parseAskHuman() の正規表現と厳密に一致させること。
+const HITL_INSTRUCTION = `# 人間への確認（HITL）— 重要
+あなたは無人で並列実行されています。実装の「土台」に関わる判断で、推測するとあとで手戻り・本番事故・コンプライアンス違反になりうる場合は、ファイルを書く前に必ず人間へ確認してください。
+
+## 確認すべき「土台」判断（例）
+- データ仕様・スキーマ（保存する項目／型／必須・任意）
+- 個人情報・要配慮個人情報（病歴・診療・遺伝情報）のマスキング／匿名化方針
+- AI 学習データとしての利用可否・制約
+- 技術スタック／ライブラリの選定（一度決めると剥がしにくいもの）
+- 本番環境・既存データに影響する操作
+
+## 確認の出し方（厳守）
+確認が必要になったら、出力の中で **次の1行だけ** を独立した行として出力し、**それ以上ファイルを書かずに終了** してください：
+[[ASK_HUMAN]] {"q":"<具体的で1文の質問>","choices":["<選択肢1>","<選択肢2>"]}
+- q は必須・具体的・1文。「どうしますか？」のような曖昧な質問は禁止。
+- 選択肢が有限なら choices に列挙（人間は番号で回答できる）。自由記述で良ければ choices は省略可。
+- JSON は1行・ダブルクオート・改行なし。複数行や説明文を同じ行に混ぜない。
+- 人間の回答は次回起動時に「[人間の回答]」として渡されます。それを前提に実装を再開してください。
+
+## 出しすぎない
+すでに明確に決まっている事・些末な実装詳細では確認を出さないこと。確認は本当に土台を左右する分岐のみに限る。
+`;
+
+// 並列パートのプロンプトに HITL 誘導を前置する。
+function withHitlPreamble(content: string): string {
+  return `${HITL_INSTRUCTION}\n---\n# タスク\n${content}`;
+}
+
 // =============================================================================
 // Slack 通知の共通フォーマット（改善4）
 //   見出し: `Part{n}/{total} {動詞}: {タイトル}`
@@ -986,7 +1016,7 @@ async function advanceWaitingForHuman(
     });
     if (claimed.count === 0) return { status: "no_op", reason: "claim_lost" };
     const resumePrompt =
-      `${next.content}\n\n[人間の回答] Q: ${next.humanQuestion ?? ""}\nA: ${answer}\n` +
+      `${withHitlPreamble(next.content)}\n\n[人間の回答] Q: ${next.humanQuestion ?? ""}\nA: ${answer}\n` +
       `この回答を前提に改めて実装を完了してください（再度判断が必要なら [[ASK_HUMAN]] を1行で出して停止）。`;
     let spawned;
     try {
@@ -1209,7 +1239,7 @@ async function advanceApproved(
     // 解決不能なら throw → 下の catch が executionStatus='error' と executionLog に記録する。
     const cwd = await ensureAccessibleCwd(workingDir);
     const spawned = await startClaudeCodeDetached(
-      next.content,
+      withHitlPreamble(next.content),
       cwd,
       noteHead(note),
     );
