@@ -76,6 +76,8 @@ export async function POST(request: Request) {
 
   let authed = false;
   let authReason = "none";
+  // セッション作成時のみ owner を設定（service-key 経路は null＝レガシー開放のまま）。
+  let ownerUserId: number | null = null;
   if (hasKey) {
     const svc = verifyServiceKey(request);
     if (svc.ok) {
@@ -92,6 +94,7 @@ export async function POST(request: Request) {
       if (sessionAuth.ok) {
         authed = true;
         authReason = "session_fallback";
+        ownerUserId = sessionAuth.session.userId;
       }
     }
   } else {
@@ -99,6 +102,7 @@ export async function POST(request: Request) {
     if (sessionAuth.ok) {
       authed = true;
       authReason = "session";
+      ownerUserId = sessionAuth.session.userId;
     } else {
       authReason = "session_missing";
     }
@@ -169,6 +173,7 @@ export async function POST(request: Request) {
       skipRequirements: result.value.skipRequirements,
       businessCategory: result.value.businessCategory,
       creatorSlackId,
+      ownerId: ownerUserId, // セッション作成者を owner に。service-key 経路は null（レガシー開放）
       sessions: { create: {} },
     },
     include: {

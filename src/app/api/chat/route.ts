@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { requireProjectAccess } from "@/lib/project-access";
 import { createSSEStream } from "@/lib/sse";
 import { extractPlanDoc, streamPmAgent } from "@/lib/agents/pm";
 import {
@@ -76,6 +77,10 @@ export async function POST(request: Request) {
   }
 
   const { sessionId, projectId, message } = result.value;
+
+  // 書込/実行の認可（ADMIN 全許可 / owner 本人 / null-owner レガシー開放 / 他人 403）
+  const access = await requireProjectAccess(projectId);
+  if (!access.ok) return access.response;
 
   console.log(
     `[ORCHESTRATOR] 受信 POST /api/chat projectId=${projectId} sessionId=${sessionId} msgLen=${message.length}`,

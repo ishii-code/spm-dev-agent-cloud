@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { requireProjectAccess } from "@/lib/project-access";
 import { isNonEmptyString, isValidNewRepoName, MAX_TITLE_LENGTH } from "@/lib/validation";
 import { isSystemId } from "@/lib/systems";
 import { isBusinessCategory, type BusinessCategoryId } from "@/lib/categories";
@@ -66,6 +67,10 @@ export async function PATCH(
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
+
+  // 編集の認可（ADMIN 全許可 / owner 本人 / null-owner レガシー開放 / 他人 403）
+  const access = await requireProjectAccess(id);
+  if (!access.ok) return access.response;
 
   let body: unknown;
   try {
@@ -174,6 +179,10 @@ export async function DELETE(
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
+
+  // 削除/アーカイブの認可（ADMIN 全許可 / owner 本人 / null-owner レガシー開放 / 他人 403）
+  const access = await requireProjectAccess(id);
+  if (!access.ok) return access.response;
 
   const existing = await prisma.project.findUnique({
     where: { id },

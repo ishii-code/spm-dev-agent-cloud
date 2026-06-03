@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { requireProjectAccess } from "@/lib/project-access";
 import { createSSEStream } from "@/lib/sse";
 import { isAllowedRepo, repoPath, newProjectPath, type RepoId } from "@/lib/repos";
 import { isNonEmptyString, isValidNewRepoName } from "@/lib/validation";
@@ -56,6 +57,10 @@ export async function POST(request: Request) {
     return Response.json({ error: validated.error }, { status: validated.status });
   }
   const { documentId, projectId, targetRepo } = validated.value;
+
+  // 書込/実行の認可（ADMIN 全許可 / owner 本人 / null-owner レガシー開放 / 他人 403）
+  const access = await requireProjectAccess(projectId);
+  if (!access.ok) return access.response;
 
   const [document, project] = await Promise.all([
     prisma.document.findUnique({ where: { id: documentId } }),
