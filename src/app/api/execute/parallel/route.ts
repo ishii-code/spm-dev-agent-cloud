@@ -1,20 +1,13 @@
-import { spawn } from "child_process";
-import { promises as fsPromises } from "fs";
-import os from "node:os";
-import path from "node:path";
 import { prisma } from "@/lib/prisma";
 import { createSSEStream } from "@/lib/sse";
-import { isAllowedRepo, repoPath, type RepoId } from "@/lib/repos";
+import { isAllowedRepo, repoPath, newProjectPath, type RepoId } from "@/lib/repos";
 import { isNonEmptyString, isValidNewRepoName } from "@/lib/validation";
 import {
   notifyExecutionStart,
-  notifyThread,
   postSlackThread,
 } from "@/lib/slack-notifier";
 import { splitIntoParts, type DevPart } from "@/lib/parallel-executor";
 import { fireAndForgetTick } from "@/lib/parallel-tick";
-
-const CODE_PATH = "/usr/local/bin/code";
 
 export const runtime = "nodejs";
 
@@ -84,7 +77,7 @@ export async function POST(request: Request) {
 
   const cwd = isAllowedRepo(targetRepo)
     ? repoPath(targetRepo as RepoId)
-    : path.join(os.homedir(), targetRepo);
+    : newProjectPath(targetRepo);
 
   const startTime = Date.now();
   const newThreadTs = await notifyExecutionStart(
@@ -96,59 +89,18 @@ export async function POST(request: Request) {
   const threadTs = newThreadTs ?? project.slackThreadTs ?? undefined;
 
   return createSSEStream(async (send) => {
+    // 新規プロジェクトの scaffold（create-next-app）と VS Code 起動は VM worker 側で実行する。
+    // ここ（Cloud Run orchestrator）の FS は ephemeral かつ worker と非共有のため、
+    // parallelWorkingDir と parallelStatus="scaffolding" を設定するだけにし、
+    // worker(parallel-tick.advanceScaffolding) が恒久ディレクトリ上で scaffold する。
     if (isNewProject) {
-      let dirExists = false;
-      try {
-        await fsPromises.access(cwd);
-        dirExists = true;
-      } catch {
-        dirExists = false;
-      }
-      if (!dirExists) {
-        send({
-          type: "execute_log",
-          data: { line: `新規リポジトリを作成中: ${cwd}\n` },
-        });
-        await fsPromises.mkdir(cwd, { recursive: true });
-        await new Promise<void>((resolve, reject) => {
-          const proc = spawn(
-            "npx",
-            [
-              "create-next-app@latest", ".",
-              "--typescript", "--tailwind", "--eslint", "--app",
-              "--src-dir", "--import-alias", "@/*",
-              "--use-npm", "--yes",
-            ],
-            {
-              cwd,
-              env: {
-                ...process.env,
-                PATH: "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
-              },
-              stdio: ["ignore", "pipe", "pipe"],
-            },
-          );
-          proc.stdout?.on("data", (d: Buffer) => {
-            send({ type: "execute_log", data: { line: d.toString() } });
-          });
-          proc.stderr?.on("data", (d: Buffer) => {
-            send({ type: "execute_log", data: { line: d.toString() } });
-          });
-          proc.on("close", (code) => {
-            if (code === 0) resolve();
-            else reject(new Error(`create-next-app failed: exit ${code}`));
-          });
-          proc.on("error", reject);
-        });
-      }
+      send({
+        type: "execute_log",
+        data: {
+          line: `🛠️ 新規プロジェクトを準備中（scaffold は実行環境で行います）: ${cwd}\n`,
+        },
+      });
     }
-
-    spawn(CODE_PATH, [cwd], {
-      detached: true,
-      stdio: "ignore",
-      env: { ...process.env },
-    }).unref();
-    notifyThread(projectId, "🖥️ VS Codeを起動しました（並列実行）").catch(() => {});
 
     // 既存パートがあれば再利用（GPT再分割しない）
     const existingParts = await prisma.document.findMany({
@@ -291,7 +243,8 @@ export async function POST(request: Request) {
         where: { id: projectId },
         data: {
           isParallel: true,
-          parallelStatus: "running",
+          // 新規は scaffold 待ち（worker が scaffold 後 "running" へ）。既存リポは即 "running"。
+          parallelStatus: isNewProject ? "scaffolding" : "running",
           parallelWorkingDir: cwd,
           parallelRunId: null,
           parallelDoneNotifiedAt: null,

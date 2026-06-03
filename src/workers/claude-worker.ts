@@ -91,7 +91,9 @@ async function runOneTick(): Promise<void> {
   let advanced = 0;
   if (projects.length > 0) {
     const settled = await Promise.allSettled(
-      projects.map((p) => processOneTick(p.id)),
+      // allowScaffold=true は VM worker のこのポーリングのみ。Cloud Run の
+      // fireAndForgetTick / tick route は false のまま（scaffold は VM 限定）。
+      projects.map((p) => processOneTick(p.id, { allowScaffold: true })),
     );
     for (const r of settled) {
       if (r.status === "fulfilled") {

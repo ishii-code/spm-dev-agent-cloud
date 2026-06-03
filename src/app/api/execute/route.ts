@@ -144,6 +144,9 @@ export async function POST(request: Request) {
       }
     }
 
+    // TODO(別issue): 並列(execute/parallel)と同じ FS 断絶あり — Cloud Run orchestrator の
+    // /root に scaffold すると VM worker から不可視。#5 と同様に scaffold を VM worker へ
+    // 移行する必要がある（newProjectPath + parallelStatus="scaffolding" 方式）。
     if (isNewProject) {
       let dirExists = false;
       try {

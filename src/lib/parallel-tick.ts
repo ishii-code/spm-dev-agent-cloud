@@ -13,6 +13,11 @@ import {
   slackConfigured,
   approvalChannel,
 } from "./slack-notifier";
+import { scaffoldNextApp } from "./scaffold";
+import { spawn } from "node:child_process";
+
+// 新規プロジェクトの scaffold 成功後に起動する VS Code（ヘッドレス VM では best-effort）。
+const CODE_PATH = "/usr/local/bin/code";
 
 // 承認・通知の宛先。creatorSlackId があれば本人 DM（threadTs なし）、
 // なければ共有チャンネル＋プロジェクトスレッド。Slack 未設定なら null。
@@ -123,7 +128,8 @@ export type TickAdvancedReason =
   | "exec_started"
   | "completed"
   | "error"
-  | "skipped";
+  | "skipped"
+  | "scaffolded";
 
 export type TickResult =
   | { status: "busy" }
@@ -274,9 +280,88 @@ async function readLogTailSafe(doneFile: string): Promise<string> {
 
 export async function findRunnableProjects(): Promise<{ id: string }[]> {
   return prisma.project.findMany({
-    where: { parallelStatus: "running", parallelRunId: null },
+    // "scaffolding" も対象に含める（VM worker が拾って create-next-app を実行）。
+    where: { parallelStatus: { in: ["running", "scaffolding"] }, parallelRunId: null },
     select: { id: true },
   });
+}
+
+// 新規プロジェクトの scaffold ステップ（VM worker 限定）。
+// parallelStatus: "scaffolding" → (claim) "scaffolding_active" → "running" / "scaffold_error"
+// claim は parallelStatus 遷移で行うため、running フェーズの parallelRunId とは干渉しない。
+async function advanceScaffolding(
+  project: { id: string; title: string; parallelWorkingDir: string | null },
+  slack: SlackTarget | null,
+  allowScaffold: boolean,
+): Promise<TickResult> {
+  // Cloud Run（orchestrator / fireAndForgetTick / tick route）では scaffold しない。
+  if (!allowScaffold) return { status: "no_op", reason: "scaffold_host_only" };
+
+  const cwd = project.parallelWorkingDir;
+  if (!cwd) {
+    await prisma.project.updateMany({
+      where: { id: project.id, parallelStatus: "scaffolding" },
+      data: { parallelStatus: "scaffold_error" },
+    });
+    await notifySlack(slack, `❌ scaffold 不能: 作業ディレクトリ未設定（${project.title}）`);
+    return { status: "no_op", reason: "scaffold_no_working_dir" };
+  }
+
+  // atomic claim: "scaffolding" → "scaffolding_active"（勝った tick だけが scaffold 実行）
+  const claimed = await prisma.project.updateMany({
+    where: { id: project.id, parallelStatus: "scaffolding" },
+    data: { parallelStatus: "scaffolding_active" },
+  });
+  if (claimed.count === 0) return { status: "no_op", reason: "scaffold_claim_lost" };
+
+  await notifySlack(slack, `🛠️ 新規プロジェクトを scaffold 中\n生成先: \`${cwd}\``);
+  console.log(`[TICK] scaffold 開始 project=${project.id} cwd=${cwd}`);
+
+  const result = await scaffoldNextApp(cwd, {
+    onLog: (line) => process.stdout.write(`[scaffold ${project.id}] ${line}`),
+  });
+
+  if (!result.ok) {
+    await prisma.project.updateMany({
+      where: { id: project.id, parallelStatus: "scaffolding_active" },
+      data: { parallelStatus: "scaffold_error" },
+    });
+    const reason = result.error
+      ? `spawn error: ${result.error}`
+      : `exit ${result.exitCode}`;
+    await notifySlack(
+      slack,
+      `❌ *create-next-app 失敗*（${reason}）\n生成先: \`${cwd}\`\n` +
+        "```\n" +
+        (result.tail.slice(-1500) || "(出力なし)") +
+        "\n```\n" +
+        `リトライ: \`npm run retry-scaffold ${project.id}\``,
+    );
+    console.error(`[TICK] scaffold 失敗 project=${project.id} ${reason}`);
+    return { status: "no_op", reason: "scaffold_failed" };
+  }
+
+  // scaffold 成功 → VS Code 起動は best-effort（ヘッドレス VM では失敗しうるが遷移をブロックしない）。
+  try {
+    spawn(CODE_PATH, [cwd], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env },
+    }).unref();
+  } catch (e) {
+    console.warn(
+      `[TICK] VS Code 起動失敗(best-effort, 無視) project=${project.id}: ${e instanceof Error ? e.message : e}`,
+    );
+  }
+
+  // "scaffolding_active" → "running"（実装フェーズへ）。parallelRunId は null のまま維持。
+  await prisma.project.updateMany({
+    where: { id: project.id, parallelStatus: "scaffolding_active" },
+    data: { parallelStatus: "running", parallelRunId: null },
+  });
+  await notifySlack(slack, `✅ scaffold 完了 — 実装フェーズへ進みます\n生成先: \`${cwd}\``);
+  console.log(`[TICK] scaffold 完了 project=${project.id} → running`);
+  return { status: "advanced", reason: "scaffolded" };
 }
 
 // 非終端パート（waiting / awaiting_approval / executing）を持つのに
@@ -510,9 +595,12 @@ async function markProjectDone(
 // 排他を担うため、複数 tick が並走しても各遷移は一度だけ起こる。
 // =============================================================================
 
-export async function processOneTick(projectId: string): Promise<TickResult> {
+export async function processOneTick(
+  projectId: string,
+  opts: { allowScaffold?: boolean } = {},
+): Promise<TickResult> {
   try {
-    return await processOneTickInner(projectId);
+    return await processOneTickInner(projectId, opts);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const stack = e instanceof Error ? e.stack : "";
@@ -521,7 +609,10 @@ export async function processOneTick(projectId: string): Promise<TickResult> {
   }
 }
 
-async function processOneTickInner(projectId: string): Promise<TickResult> {
+async function processOneTickInner(
+  projectId: string,
+  opts: { allowScaffold?: boolean },
+): Promise<TickResult> {
   const project = await prisma.project
     .findUnique({
       where: { id: projectId },
@@ -541,12 +632,19 @@ async function processOneTickInner(projectId: string): Promise<TickResult> {
       return null;
     });
   if (!project) return { status: "no_op", reason: "project_not_found" };
+
+  // 承認・通知の宛先（creatorSlackId があれば本人 DM、なければ共有チャンネル＋スレッド）。
+  const slack = await resolveSlackTarget(project);
+
+  // 新規プロジェクトの scaffold ステップ（VM worker 限定）。
+  // Cloud Run の fireAndForgetTick / tick route は allowScaffold=false で no_op になる。
+  if (project.parallelStatus === "scaffolding") {
+    return await advanceScaffolding(project, slack, opts.allowScaffold ?? false);
+  }
   if (project.parallelStatus !== "running") {
     return { status: "no_op", reason: "not_running" };
   }
 
-  // 承認・通知の宛先（creatorSlackId があれば本人 DM、なければ共有チャンネル＋スレッド）。
-  const slack = await resolveSlackTarget(project);
   const workingDir = project.parallelWorkingDir ?? process.cwd();
 
   // E) 非終端パートが 0 件 → done 化（markProjectDone が atomic claim で冪等化）
