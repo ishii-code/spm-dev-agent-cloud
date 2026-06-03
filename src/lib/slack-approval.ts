@@ -144,6 +144,45 @@ export async function checkReactionOnce(
   return "pending";
 }
 
+// HITL 回答受理用：質問メッセージ(parentTs)のスレッド返信のうち、
+// 「指定ユーザー(SLACK_MENTION_USER_ID→ASK_USER_ID→既定 U0AMRAQDW65)の非bot返信」の
+// 最新テキストを返す。他者/bot/親メッセージは無視。channels:history/groups:history 必須。
+export async function readLatestUserReply(
+  parentTs: string,
+  channel: string = SLACK_CHANNEL,
+): Promise<string | null> {
+  if (!SLACK_TOKEN || !parentTs) return null;
+  const userId =
+    process.env.SLACK_MENTION_USER_ID ?? process.env.ASK_USER_ID ?? "U0AMRAQDW65";
+  try {
+    const res = await fetch(
+      `https://slack.com/api/conversations.replies?channel=${encodeURIComponent(channel)}&ts=${encodeURIComponent(parentTs)}&limit=50`,
+      { headers: { Authorization: `Bearer ${SLACK_TOKEN}` } },
+    );
+    const data = (await res.json()) as {
+      ok: boolean;
+      error?: string;
+      messages?: { user?: string; bot_id?: string; text?: string; ts?: string }[];
+    };
+    if (!data.ok) {
+      console.warn(`[SLACK] conversations.replies failed (${channel}): ${data.error}`);
+      return null;
+    }
+    const replies = (data.messages ?? []).filter(
+      (m) =>
+        m.ts !== parentTs &&
+        !m.bot_id &&
+        m.user === userId &&
+        (m.text ?? "").trim().length > 0,
+    );
+    if (replies.length === 0) return null;
+    return (replies[replies.length - 1].text ?? "").trim();
+  } catch (e) {
+    console.warn(`[SLACK] conversations.replies error: ${e}`);
+    return null;
+  }
+}
+
 // 既存スレッドにメッセージを追加投稿し、そのメッセージの ts を返す。
 // 後段の waitForReactionApproval / waitForReactionChoice にこの ts を渡すと、
 // 同じメッセージのリアクションでユーザー応答を待ち受けられる。

@@ -12,6 +12,7 @@ import {
   openDmChannel,
   slackConfigured,
   approvalChannel,
+  readLatestUserReply,
 } from "./slack-notifier";
 import { scaffoldNextApp } from "./scaffold";
 import { spawn } from "node:child_process";
@@ -466,6 +467,12 @@ interface PartRow {
   execStartedAt: Date | null;
   execDoneFile: string | null;
   dependsOn: unknown;
+  humanQuestion: string | null;
+  humanChoices: unknown;
+  humanQuestionTs: string | null;
+  humanAnswer: string | null;
+  humanAskedAt: Date | null;
+  humanRenotifiedAt: Date | null;
 }
 
 // tick 開始時点で「進められる」全パートを 4 種類に分類して返す。
@@ -482,6 +489,7 @@ export interface ReadyParts {
   awaitingApproval: PartRow[];
   approved: PartRow[];
   executing: PartRow[];
+  needsHuman: PartRow[];
 }
 
 export async function resolveAllReadyParts(projectId: string): Promise<ReadyParts> {
@@ -503,6 +511,12 @@ export async function resolveAllReadyParts(projectId: string): Promise<ReadyPart
       execStartedAt: true,
       execDoneFile: true,
       dependsOn: true,
+      humanQuestion: true,
+      humanChoices: true,
+      humanQuestionTs: true,
+      humanAnswer: true,
+      humanAskedAt: true,
+      humanRenotifiedAt: true,
     },
   });
 
@@ -523,6 +537,12 @@ export async function resolveAllReadyParts(projectId: string): Promise<ReadyPart
       execStartedAt: p.execStartedAt,
       execDoneFile: p.execDoneFile,
       dependsOn: p.dependsOn,
+      humanQuestion: p.humanQuestion,
+      humanChoices: p.humanChoices,
+      humanQuestionTs: p.humanQuestionTs,
+      humanAnswer: p.humanAnswer,
+      humanAskedAt: p.humanAskedAt,
+      humanRenotifiedAt: p.humanRenotifiedAt,
     }));
 
   const completedNums = new Set(
@@ -534,11 +554,18 @@ export async function resolveAllReadyParts(projectId: string): Promise<ReadyPart
     awaitingApproval: [],
     approved: [],
     executing: [],
+    needsHuman: [],
   };
 
   for (const p of rows) {
     if (p.executionStatus === "completed" || p.executionStatus === "skipped" || p.executionStatus === "error") {
       continue; // terminal
+    }
+    // HITL: needs_human / blocked は専用 advance（completed にしない・依存は進めない）。
+    // blocked も late reply 復帰のため needsHuman に入れる（advanceWaitingForHuman 内で区別）。
+    if (p.executionStatus === "needs_human" || p.executionStatus === "blocked") {
+      result.needsHuman.push(p);
+      continue;
     }
     if (p.executionStatus === "executing") {
       result.executing.push(p);
@@ -579,7 +606,9 @@ async function hasNonTerminal(projectId: string): Promise<boolean> {
     where: {
       projectId,
       type: "sprint_part",
-      executionStatus: { in: ["waiting", "awaiting_approval", "executing"] },
+      executionStatus: {
+        in: ["waiting", "awaiting_approval", "executing", "needs_human", "blocked"],
+      },
     },
   });
   return remaining > 0;
@@ -690,7 +719,7 @@ async function processOneTickInner(
   const repo = repoBasename(project.parallelWorkingDir, project.targetSystem);
 
   console.log(
-    `[TICK] project=${projectId} ready: waiting=${ready.waiting.length} awaitingApproval=${ready.awaitingApproval.length} approved=${ready.approved.length} executing=${ready.executing.length} total=${total}`,
+    `[TICK] project=${projectId} ready: waiting=${ready.waiting.length} awaitingApproval=${ready.awaitingApproval.length} approved=${ready.approved.length} executing=${ready.executing.length} needsHuman=${ready.needsHuman.length} total=${total}`,
   );
 
   // 通知フォーマット用コンテキスト（改善4）。状態遷移には影響しない読み取りのみ。
@@ -706,7 +735,7 @@ async function processOneTickInner(
   type AdvanceJob = {
     partId: string;
     partNumber: number;
-    phase: "executing" | "approved" | "awaitingApproval" | "waiting";
+    phase: "executing" | "approved" | "awaitingApproval" | "waiting" | "needsHuman";
     // 観測用スナップショット（毎 tick ログに出す。遷移の診断を容易にする）
     executionStatus: string | null;
     approvalState: string | null;
@@ -750,6 +779,14 @@ async function processOneTickInner(
       phase: "waiting",
       ...snapshot(p),
       run: () => advanceWaiting(p, noteFor(p), slack),
+    })),
+    // E) needs_human / blocked → HITL（質問投稿・回答待ち・回答で再 spawn）
+    ...ready.needsHuman.map<AdvanceJob>((p) => ({
+      partId: p.id,
+      partNumber: p.partNumber,
+      phase: "needsHuman",
+      ...snapshot(p),
+      run: () => advanceWaitingForHuman(p, noteFor(p), workingDir, slack),
     })),
   ];
 
@@ -869,6 +906,148 @@ async function advanceWaiting(
     },
   });
   return { status: "advanced", reason: "approval_posted" };
+}
+
+// E) needs_human / blocked → HITL（実行中の人間判断）。post/poll/resume はすべて VM 限定。
+//   needs_human + ts無 → Slack 質問投稿（mention は withMention で自動）
+//   needs_human/blocked + ts有 → 回答確認（番号→choice / テキスト / ✅❌）→ 回答で原prompt＋回答を
+//     注入して claude 再 spawn（executing 復帰・多段のため human* リセット）
+//   needs_human 30分無回答 → blocked（auto-proceed しない）。blocked は late reply で復帰・再通知はスロットル。
+async function advanceWaitingForHuman(
+  next: PartRow,
+  note: PartNote,
+  workingDir: string,
+  slack: SlackTarget | null,
+): Promise<TickResult> {
+  if (!isExecHost()) return { status: "no_op", reason: "exec_host_only" };
+  const HUMAN_TIMEOUT_MS = Number(process.env.HITL_TIMEOUT_MS ?? 30 * 60 * 1000);
+  const HITL_RENOTIFY_MS = Number(process.env.HITL_RENOTIFY_MS ?? 30 * 60 * 1000);
+  const channel = slack?.channel;
+
+  // 1) 未投稿（needs_human かつ ts無）→ Slack 質問投稿
+  if (next.executionStatus === "needs_human" && !next.humanQuestionTs) {
+    const claim = await prisma.document.updateMany({
+      where: { id: next.id, executionStatus: "needs_human", humanAskedAt: null },
+      data: { humanAskedAt: new Date() }, // post-once claim 兼 timeout 起点
+    });
+    if (claim.count === 0) return { status: "no_op", reason: "claim_lost" };
+    if (!slack || !channel) {
+      await prisma.document.updateMany({
+        where: { id: next.id, executionStatus: "needs_human" },
+        data: { executionStatus: "blocked" },
+      });
+      console.warn(`[TICK] Part${next.partNumber} HITL: Slack 未設定→blocked`);
+      return { status: "advanced", reason: "blocked" };
+    }
+    const choices = Array.isArray(next.humanChoices) ? (next.humanChoices as string[]) : [];
+    const choiceLines = choices.length
+      ? "\n" + choices.map((c, i) => `${i + 1}. ${c}`).join("\n") + "\n（番号 or テキストでスレッド返信）"
+      : "\n（このスレッドに回答を返信してください）";
+    const text =
+      `🤔 *${noteHead(note, "確認(HITL)")}*${repoLine(note)}\n` +
+      `${next.humanQuestion ?? "(質問本文なし)"}${choiceLines}\n` +
+      `はい/いいえは ✅ / ❌ リアクションでも可`;
+    const ts = await postSlackTo(channel, text, slack.threadTs);
+    if (!ts) {
+      await prisma.document.update({ where: { id: next.id }, data: { humanAskedAt: null } });
+      return { status: "no_op", reason: "hitl_post_failed" };
+    }
+    await prisma.document.update({ where: { id: next.id }, data: { humanQuestionTs: ts } });
+    console.log(`[TICK] Part${next.partNumber} HITL 質問投稿 ts=${ts}`);
+    return { status: "advanced", reason: "needs_human" };
+  }
+
+  // 2) 投稿済み → 回答確認（本人のスレッド最新返信を優先、無ければ ✅/❌ リアクション）
+  const ts = next.humanQuestionTs;
+  if (!ts) return { status: "no_op", reason: "hitl_no_ts" };
+  const ch = channel ?? approvalChannel();
+  let answer: string | null = null;
+  const reply = await readLatestUserReply(ts, ch);
+  if (reply) {
+    const choices = Array.isArray(next.humanChoices) ? (next.humanChoices as string[]) : [];
+    const num = Number.parseInt(reply.trim(), 10);
+    answer =
+      choices.length && !Number.isNaN(num) && num >= 1 && num <= choices.length
+        ? choices[num - 1]
+        : reply.trim();
+  } else {
+    const r = await checkReactionOnce(ts, ch);
+    if (r === "approved") answer = "はい";
+    else if (r === "rejected") answer = "いいえ";
+  }
+
+  // 3) 回答あり → 原prompt＋回答を注入して再 spawn（executing 復帰・human* リセット）
+  if (answer) {
+    const cwd = await ensureAccessibleCwd(workingDir).catch(() => null);
+    if (!cwd) return { status: "no_op", reason: "cwd_unavailable" };
+    const claimed = await prisma.document.updateMany({
+      where: { id: next.id, executionStatus: { in: ["needs_human", "blocked"] }, execPid: null },
+      data: { execPid: SPAWN_CLAIM_PID, execStartedAt: new Date() },
+    });
+    if (claimed.count === 0) return { status: "no_op", reason: "claim_lost" };
+    const resumePrompt =
+      `${next.content}\n\n[人間の回答] Q: ${next.humanQuestion ?? ""}\nA: ${answer}\n` +
+      `この回答を前提に改めて実装を完了してください（再度判断が必要なら [[ASK_HUMAN]] を1行で出して停止）。`;
+    let spawned;
+    try {
+      spawned = await startClaudeCodeDetached(resumePrompt, cwd, noteHead(note));
+    } catch (e) {
+      await prisma.document.update({
+        where: { id: next.id },
+        data: { execPid: null, execStartedAt: null },
+      });
+      console.error(`[TICK] Part${next.partNumber} HITL 再spawn失敗: ${e instanceof Error ? e.message : e}`);
+      return { status: "no_op", reason: "respawn_failed" };
+    }
+    await prisma.document.update({
+      where: { id: next.id },
+      data: {
+        executionStatus: "executing",
+        execPid: spawned.pid,
+        execStartedAt: new Date(),
+        execDoneFile: spawned.doneFile,
+        executionLog: `[HITL再開] PID=${spawned.pid} 回答=${answer.slice(0, 60)}\n`,
+        humanAnswer: answer,
+        // 多段：次の [[ASK_HUMAN]] を新規投稿できるようリセット
+        humanQuestionTs: null,
+        humanAskedAt: null,
+        humanRenotifiedAt: null,
+      },
+    });
+    await notifySlack(slack, `▶️ *${noteHead(note, "回答受領・再開")}*${repoLine(note)}\n回答: ${answer.slice(0, 80)}`).catch(() => {});
+    console.log(`[TICK] Part${next.partNumber} HITL 回答受領→再spawn pid=${spawned.pid}`);
+    return { status: "advanced", reason: "human_answered" };
+  }
+
+  // 4) 回答なし → needs_human の 30分タイムアウトで blocked（auto-proceed しない）
+  const askedAt = next.humanAskedAt?.getTime() ?? Date.now();
+  if (next.executionStatus === "needs_human" && Date.now() - askedAt > HUMAN_TIMEOUT_MS) {
+    const claimed = await prisma.document.updateMany({
+      where: { id: next.id, executionStatus: "needs_human" },
+      data: { executionStatus: "blocked", humanRenotifiedAt: new Date() },
+    });
+    if (claimed.count === 0) return { status: "no_op", reason: "claim_lost" };
+    await notifySlack(slack, `⏸️ *${noteHead(note, "保留(blocked)")}*${repoLine(note)}\n30分回答なし。後でスレッド返信すれば再開します（自動では進めません）。`).catch(() => {});
+    console.log(`[TICK] Part${next.partNumber} HITL → blocked(timeout)`);
+    return { status: "advanced", reason: "blocked" };
+  }
+
+  // 5) blocked かつ回答なし → 再通知スロットル（鳴らし続けない）
+  if (next.executionStatus === "blocked") {
+    const lastNotif = next.humanRenotifiedAt?.getTime() ?? 0;
+    if (Date.now() - lastNotif > HITL_RENOTIFY_MS) {
+      const c = await prisma.document.updateMany({
+        where: { id: next.id, executionStatus: "blocked" },
+        data: { humanRenotifiedAt: new Date() },
+      });
+      if (c.count > 0) {
+        await postSlackTo(ch, `🔔 未回答の確認があります（${noteHead(note)}）。スレッド返信で再開します。`, ts).catch(() => {});
+      }
+    }
+    return { status: "no_op", reason: "hitl_blocked_waiting" };
+  }
+
+  return { status: "no_op", reason: "awaiting_human" };
 }
 
 // B) awaiting_approval → リアクションを 1 回だけ確認

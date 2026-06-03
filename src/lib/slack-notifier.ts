@@ -22,6 +22,7 @@ export {
   postSlackTo,
   slackConfigured,
   approvalChannel,
+  readLatestUserReply,
 } from "./slack-approval";
 export type { SlackApprovalResult } from "./slack-approval";
 
