@@ -34,8 +34,10 @@ jobs:
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          # 既存 GCP_SA_KEY を優先しつつ、新命名 GCP_SERVICE_ACCOUNT_KEY もフォールバック対応。
-          credentials_json: ${{ secrets.GCP_SA_KEY || secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          # Workload Identity Federation（keyless / OIDC）。長期 SA JSON キーは使わない（#8）。
+          # permissions.id-token: write（上記）必須。repo は WIF provider の attribute-condition で限定。
+          workload_identity_provider: "projects/842623777962/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+          service_account: "spm-dev-agent-sa@vets-biz-aigen-apps.iam.gserviceaccount.com"
 
       - name: Set up gcloud SDK
         uses: google-github-actions/setup-gcloud@v2
