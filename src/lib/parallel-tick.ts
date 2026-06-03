@@ -389,7 +389,12 @@ export async function resumeStuckProjects(): Promise<number> {
       type: "sprint_part",
       executionStatus: { in: ["waiting", "awaiting_approval", "executing"] },
       project: {
-        parallelStatus: { not: "running" },
+        // scaffold フェーズ（"scaffolding"/"scaffolding_active"/"scaffold_error"）は
+        // 巻き上げない。これらを "running" にすると create-next-app をスキップして
+        // 存在しない dir で実装が走ってしまう（#5 の本丸）。
+        parallelStatus: {
+          notIn: ["running", "scaffolding", "scaffolding_active", "scaffold_error"],
+        },
         archivedAt: null,
       },
     },
@@ -402,7 +407,10 @@ export async function resumeStuckProjects(): Promise<number> {
   const updated = await prisma.project.updateMany({
     where: {
       id: { in: ids },
-      parallelStatus: { not: "running" },
+      // scaffold フェーズは巻き上げない（findMany 側で除外済みだが defense-in-depth）。
+      parallelStatus: {
+        notIn: ["running", "scaffolding", "scaffolding_active", "scaffold_error"],
+      },
       archivedAt: null,
     },
     data: {

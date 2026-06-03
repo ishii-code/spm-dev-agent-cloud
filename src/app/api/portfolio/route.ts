@@ -16,6 +16,11 @@ function deriveProjectStatus(
     case 'running':
     case 'executing':
       return { status: 'IN_PROGRESS', label: '⚡ 開発中' }
+    case 'scaffolding':
+    case 'scaffolding_active':
+      return { status: 'IN_PROGRESS', label: '🛠️ 準備中' }
+    case 'scaffold_error':
+      return { status: 'UNDER_REVISION', label: '⚠️ 準備失敗' }
     case 'paused':
       return { status: 'UNDER_REVISION', label: '⏸️ 一時停止' }
     default:
