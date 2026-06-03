@@ -27,3 +27,32 @@ export function projectsRoot(): string {
 export function repoPath(id: RepoId): string {
   return path.join(projectsRoot(), id);
 }
+
+// 新規プロジェクト（create-next-app で scaffold する新規リポジトリ）の親ディレクトリ。
+// scaffold は VM worker 上の恒久ディレクトリで実行する必要があるため、
+// 既存リポジトリの projectsRoot() とは分離する。
+//   - 既定: /home/ishiitakeshi/spm-projects（VM worker 実行ユーザの恒久パス）
+//   - SPM_NEW_PROJECTS_ROOT で上書き可能（env 未設定でも既定で動く）
+//   - /root・/tmp 配下は ephemeral／FS 非共有のため明示的に拒否する
+const FORBIDDEN_NEW_PROJECT_ROOTS = ["/root", "/tmp"] as const;
+const DEFAULT_NEW_PROJECTS_ROOT = "/home/ishiitakeshi/spm-projects";
+
+export function newProjectsRoot(): string {
+  const fromEnv = process.env.SPM_NEW_PROJECTS_ROOT?.trim();
+  const root =
+    fromEnv && fromEnv.length > 0 ? fromEnv : DEFAULT_NEW_PROJECTS_ROOT;
+  const normalized = path.resolve(root);
+  for (const forbidden of FORBIDDEN_NEW_PROJECT_ROOTS) {
+    if (normalized === forbidden || normalized.startsWith(forbidden + path.sep)) {
+      throw new Error(
+        `SPM_NEW_PROJECTS_ROOT must not be under ${forbidden} ` +
+          `(ephemeral / not shared with VM worker): got ${normalized}`,
+      );
+    }
+  }
+  return normalized;
+}
+
+export function newProjectPath(repo: string): string {
+  return path.join(newProjectsRoot(), repo);
+}
