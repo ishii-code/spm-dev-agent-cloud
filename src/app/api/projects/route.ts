@@ -36,6 +36,7 @@ const PROJECT_SELECT = {
   skipRequirements: true,
   isParallel: true,
   businessCategory: true,
+  ownerId: true,
   createdAt: true,
   updatedAt: true,
 } as const;

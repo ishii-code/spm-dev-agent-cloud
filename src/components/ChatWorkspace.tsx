@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isAllowedRepo } from "@/lib/repos";
+import { decideProjectAccess } from "@/lib/project-access-decision";
 import { SYSTEMS, NEW_GROUP_LABEL, getSystem } from "@/lib/systems";
 import {
   BUSINESS_CATEGORIES,
@@ -114,6 +115,7 @@ interface ProjectDetail {
     id: string;
     title: string;
     description: string | null;
+    ownerId: number | null;
     targetSystem: string | null;
     targetLabel: string | null;
     sessions: {
@@ -234,6 +236,36 @@ export function ChatWorkspace({
   const [isSavingCategory, setIsSavingCategory] = useState(false);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
+  // Phase2.1 UI 出し分け：現在ユーザ（role/id）と表示中プロジェクトの owner。
+  // サーバ認可(requireProjectAccess)が正。ここは表示制御のみ（同じ decideProjectAccess を再利用）。
+  const [currentUser, setCurrentUser] = useState<{ id: number; role: "ADMIN" | "USER" } | null>(null);
+  const [projectOwnerId, setProjectOwnerId] = useState<number | null>(null);
+
+  // 現在ユーザを一度取得（未ログイン/取得失敗時は null＝制御せず素通し。実体はサーバが 403）。
+  useEffect(() => {
+    let aborted = false;
+    void fetch("/api/auth/me")
+      .then((r) => r.json())
+      .then((d: { user?: { id: number; role: "ADMIN" | "USER" } | null }) => {
+        if (!aborted && d.user) setCurrentUser({ id: d.user.id, role: d.user.role });
+      })
+      .catch(() => {});
+    return () => {
+      aborted = true;
+    };
+  }, []);
+
+  // 書込/実行の可否（currentUser 未取得時は true＝UI は素通し、サーバが最終ゲート）。
+  const canWrite = useMemo(
+    () => (!currentUser ? true : decideProjectAccess(currentUser.role, currentUser.id, projectOwnerId) === "allow"),
+    [currentUser, projectOwnerId],
+  );
+  // useCallback の依存を増やさずに最新 canWrite をハンドラから参照するための ref。
+  const canWriteRef = useRef(true);
+  useEffect(() => {
+    canWriteRef.current = canWrite;
+  }, [canWrite]);
+  const READONLY_MSG = "他のメンバーの案件のため、実行・編集はできません（閲覧のみ）";
 
   // 戻り値: 解決した sessionId（無ければ null）。sendMessage 側で
   // activeSessionId が未設定のときの復旧に使うため返す。
@@ -258,6 +290,7 @@ export function ChatWorkspace({
         })),
       );
       setDocuments(data.project.documents);
+      setProjectOwnerId(data.project.ownerId ?? null);
       if (resolvedStatus === "executing") {
         setExecutionLog([
           "⚡ Claude Codeがバックグラウンドで実行中です",
@@ -552,6 +585,7 @@ export function ChatWorkspace({
   );
 
   const sendMessage = useCallback(async (overrideContent?: string) => {
+    if (!canWriteRef.current) { setErrorMessage(READONLY_MSG); return; }
     const trimmed = (overrideContent ?? input).trim();
     // 入力なし / プロジェクト未選択 / 送信中 は正当な no-op。
     // ※ activeSessionId はここで弾かず下で確保する（従来は null だと無言で
@@ -786,6 +820,7 @@ export function ChatWorkspace({
 
   const runExecute = useCallback(
     async (documentId: string, targetRepo: string, force = false) => {
+      if (!canWriteRef.current) { setErrorMessage(READONLY_MSG); return; }
       if (!activeProjectId || executingDocId) return;
       // #4: scaffold/実行中の二重 execute を防止する再発火ガード。
       if (["scaffolding", "scaffolding_active", "running"].includes(parallelStatus ?? "")) return;
@@ -914,6 +949,7 @@ export function ChatWorkspace({
 
   const runParallelExecute = useCallback(
     async (documentId: string, targetRepo: string) => {
+      if (!canWriteRef.current) { setErrorMessage(READONLY_MSG); return; }
       if (!activeProjectId || executingDocId) return;
       // #4: scaffold/実行中の二重 execute を防止する再発火ガード。
       if (["scaffolding", "scaffolding_active", "running"].includes(parallelStatus ?? "")) return;
@@ -1544,16 +1580,23 @@ export function ChatWorkspace({
           )}
 
         <div className="border-t border-peco-gray-300 bg-peco-bg p-4">
+          {!canWrite && (
+            <div className="mb-2 rounded-peco-md bg-peco-gray-100 px-3 py-2 text-sm text-peco-text-muted">
+              👁️ 他のメンバーの案件です（閲覧のみ）。実行・編集はオーナーまたは管理者のみ可能です。
+            </div>
+          )}
           <div className="flex gap-3">
             <textarea
               className="flex-1 min-h-[60px] max-h-40 resize-none rounded-peco-md border border-peco-gray-300 px-3 py-2 text-base text-peco-text-primary placeholder:text-peco-text-muted focus:outline-none focus:border-peco-primary disabled:opacity-50"
               placeholder={
-                activeProjectId
+                !canWrite
+                  ? "閲覧のみ（他メンバーの案件）"
+                  : activeProjectId
                   ? "Orchestratorに依頼を入力（Cmd/Ctrl+Enterで送信）"
                   : "プロジェクトを選択してください"
               }
               value={input}
-              disabled={!activeProjectId || isSending}
+              disabled={!activeProjectId || isSending || !canWrite}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -1565,7 +1608,7 @@ export function ChatWorkspace({
             <button
               type="button"
               onClick={() => void sendMessage()}
-              disabled={!activeProjectId || isSending || !input.trim()}
+              disabled={!activeProjectId || isSending || !input.trim() || !canWrite}
               className={`${BTN_PRIMARY} h-12 self-end px-6`}
             >
               {isSending ? "送信中…" : "送信"}

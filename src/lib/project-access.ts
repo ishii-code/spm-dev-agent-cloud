@@ -5,22 +5,13 @@
 import { NextResponse } from "next/server";
 import { prisma } from "./prisma";
 import { getSession, type SessionPayload } from "./auth";
+import { decideProjectAccess } from "./project-access-decision";
+
+export { decideProjectAccess };
 
 export type ProjectAccessResult =
   | { ok: true; session: SessionPayload; ownerId: number | null }
   | { ok: false; response: NextResponse };
-
-// 認可判定の純粋ロジック（cookie/DB 非依存・単体テスト可）。
-//   ADMIN=allow / 一般は ownerId===userId なら allow / null-owner は allow（レガシー開放） / 他人 forbid
-export function decideProjectAccess(
-  role: "ADMIN" | "USER",
-  userId: number,
-  ownerId: number | null,
-): "allow" | "forbid" {
-  if (role === "ADMIN") return "allow";
-  if (ownerId == null) return "allow";
-  return ownerId === userId ? "allow" : "forbid";
-}
 
 export async function requireProjectAccess(projectId: string): Promise<ProjectAccessResult> {
   const session = await getSession();
