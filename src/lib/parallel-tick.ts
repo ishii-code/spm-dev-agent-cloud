@@ -138,7 +138,10 @@ export type TickAdvancedReason =
   | "completed"
   | "error"
   | "skipped"
-  | "scaffolded";
+  | "scaffolded"
+  | "needs_human"
+  | "human_answered"
+  | "blocked";
 
 export type TickResult =
   | { status: "busy" }
@@ -1130,6 +1133,28 @@ async function advanceExecuting(
     return { status: "no_op", reason: "still_running" };
   }
 
+  // needs_human: claude が [[ASK_HUMAN]] で人間判断を要求 → completed にせず needs_human へ。
+  // 質問/選択肢を保存。Slack 投稿・回答待ち・再 spawn は advanceWaitingForHuman が担当。
+  if (status === "needs_human") {
+    const q = inspect.ask?.q ?? "(質問本文の取得に失敗)";
+    const choices = inspect.ask?.choices ?? [];
+    const claimed = await prisma.document.updateMany({
+      where: { id: next.id, executionStatus: "executing" },
+      data: {
+        executionStatus: "needs_human",
+        humanQuestion: q,
+        humanChoices: choices as unknown as object,
+        humanQuestionTs: null,
+        humanAnswer: null,
+        humanAskedAt: null,
+        humanRenotifiedAt: null,
+      },
+    });
+    if (claimed.count === 0) return { status: "no_op", reason: "claim_lost" };
+    console.log(`[TICK] Part${next.partNumber} → needs_human: ${q.slice(0, 80)}`);
+    return { status: "advanced", reason: "needs_human" };
+  }
+
   // success / failed — ログは inspectExec で読み込み済み。
   const logTail = inspect.log;
 
@@ -1267,11 +1292,35 @@ async function finalizeExecError(
 }
 
 interface ExecInspect {
-  status: "running" | "success" | "failed";
+  status: "running" | "success" | "failed" | "needs_human";
   exitCode: number | null;
   logFile: string;
   log: string;
   logSize: number;
+  ask: { q: string; choices: string[] } | null; // [[ASK_HUMAN]] 検出時の質問
+}
+
+// [[ASK_HUMAN]] マーカーを厳格にパースする（HITL condition2）。
+// 専用行・行頭・1行・必須キー q を持つ正しい JSON のときのみ {q, choices} を返す。
+// パース失敗 / q 欠落 / choices 非配列は null（誤検出で止めない＝通常出力扱い）。
+// 複数あれば最後のものを採用。
+function parseAskHuman(log: string): { q: string; choices: string[] } | null {
+  let found: { q: string; choices: string[] } | null = null;
+  for (const line of log.split(/\r?\n/)) {
+    const m = line.match(/^\s*\[\[ASK_HUMAN\]\]\s*(\{.*\})\s*$/);
+    if (!m) continue;
+    try {
+      const obj = JSON.parse(m[1]) as { q?: unknown; choices?: unknown };
+      if (typeof obj.q !== "string" || obj.q.trim().length === 0) continue;
+      const choices = Array.isArray(obj.choices)
+        ? obj.choices.filter((c): c is string => typeof c === "string")
+        : [];
+      found = { q: obj.q.trim(), choices };
+    } catch {
+      // JSON パース失敗は通常出力扱い
+    }
+  }
+  return found;
 }
 
 // doneFile / logFile を一度に読み取り、exitCode とログ本文を返す。
@@ -1311,9 +1360,12 @@ async function inspectExec(doneFile: string, pid: number | null): Promise<ExecIn
     }
   }
 
+  const ask = parseAskHuman(log);
   let status: ExecInspect["status"];
   if (doneExists) {
-    status = exitCode === 0 ? "success" : "failed";
+    // claude が [[ASK_HUMAN]] で質問して停止した場合は exit code に関わらず needs_human を優先。
+    if (ask) status = "needs_human";
+    else status = exitCode === 0 ? "success" : "failed";
   } else if (pid != null) {
     try {
       process.kill(pid, 0);
@@ -1326,9 +1378,9 @@ async function inspectExec(doneFile: string, pid: number | null): Promise<ExecIn
   }
 
   console.log(
-    `[RUNNER] checkClaudeCode runId=${runId} doneFile=${doneFile} logFile=${logFile} exitCode=${exitCode} logSize=${logSize}`,
+    `[RUNNER] checkClaudeCode runId=${runId} doneFile=${doneFile} logFile=${logFile} exitCode=${exitCode} logSize=${logSize} status=${status}${ask ? " ASK_HUMAN" : ""}`,
   );
-  return { status, exitCode, logFile, log, logSize };
+  return { status, exitCode, logFile, log, logSize, ask };
 }
 
 // =============================================================================
