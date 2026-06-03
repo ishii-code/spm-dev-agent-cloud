@@ -108,7 +108,7 @@ model Document {
   partNumber   Int? // 並列実行時のパート番号（1始まり）
   partTitle    String? // パートのタイトル
   executionLog String?   @db.Text // Claude Code実行ログ
-  // waiting / awaiting_approval / executing / completed / skipped / error
+  // waiting / awaiting_approval / executing / completed / skipped / error / needs_human / blocked
   executionStatus String?  @default("waiting")
   executedAt   DateTime?
   // 並列 tick 駆動メタデータ
@@ -125,6 +125,14 @@ model Document {
   execPid          Int?      // 実行中 Claude Code プロセスの PID
   execStartedAt    DateTime? // 実行開始時刻（タイムアウト判定用）
   execDoneFile     String?   // 完了検出用ファイルパス（中身に終了コードを書く）
+  // HITL（実行中の人間判断）用 — 全 nullable・後方互換（旧コードは無視可）。
+  // executionStatus に 'needs_human'（回答待ち）/ 'blocked'（30分タイムアウト保持）が加わる。
+  humanQuestion     String?   @db.Text // claude の質問（[[ASK_HUMAN]] の q）
+  humanChoices      Json?     // 選択肢（[[ASK_HUMAN]] の choices、任意・番号/テキストマップ用）
+  humanQuestionTs   String?   // 質問を投稿した Slack メッセージ ts（返信/リアクション poll 用）
+  humanAnswer       String?   @db.Text // 採用した人間の回答（テキスト or マップ後の選択肢）
+  humanAskedAt      DateTime? // 質問投稿時刻（30分タイムアウト判定）
+  humanRenotifiedAt DateTime? // blocked 再通知の最終時刻（鳴らし続け防止）
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 }
