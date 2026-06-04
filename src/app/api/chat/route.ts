@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { requireProjectAccess } from "@/lib/project-access";
 import { createSSEStream } from "@/lib/sse";
-import { extractPlanDoc, streamPmAgent } from "@/lib/agents/pm";
+import { extractPlanDoc, streamPmAgent, reviewDesignConsistency } from "@/lib/agents/pm";
 import {
   createRequirementsDoc,
   detectDomains,
@@ -240,6 +240,61 @@ export async function POST(request: Request) {
               obsidianPath: savedPlan.obsidianPath,
             },
           });
+
+          // ===================================================================
+          // 設計⇄要件 整合検証（Phase B）。実装kickoff前に、要件の全項目カバー＋
+          // 仕様外混入（受付なし→受付 等の反転）を critic で判定。fail→1回だけ再生成→
+          // なお fail なら needs_review（人間ゲート：実装前に確認を促す）。
+          // ===================================================================
+          let planDoc = rawPlanDoc;
+          let review = await reviewDesignConsistency(reqDoc, planDoc);
+          if (review.verdict === "fail") {
+            // 欠落/混入を明示して 1 回だけ再生成。
+            send({ type: "phase_start", data: { phase: "design", label: "🔁 設計を要件に合わせて再生成中..." } });
+            send({ type: "agent", data: { agent: "agent2", status: "thinking" } });
+            const hint =
+              `\n\n## 設計修正の必須事項（前回の整合チェックで不整合）\n` +
+              (review.missingSignals.length ? `- 次の要件項目を必ず反映: ${review.missingSignals.join(", ")}\n` : "") +
+              (review.reasons.length ? `- 次の問題を解消: ${review.reasons.join(" / ")}\n` : "") +
+              `- 「〜なし」「不要」と書かれた要素を設計に追加しないこと。`;
+            const regen = await streamPmAgent({
+              history: pmHistory,
+              requirementsDoc: `${reqDoc}${hint}`,
+              onText: (chunk) => send({ type: "text", data: { agent: "agent2", chunk } }),
+            });
+            const regenPlan = extractPlanDoc(regen.fullText) ?? regen.fullText;
+            if (regenPlan.length >= 200) {
+              planDoc = regenPlan;
+              try {
+                await writeVaultFile(planRelative, planDoc);
+              } catch {
+                /* Vault 失敗は無視（DB が正） */
+              }
+              await prisma.document.update({ where: { id: savedPlan.id }, data: { content: planDoc } });
+              await prisma.message.create({
+                data: { sessionId, role: "agent2", content: regen.fullText, agentType: "pm" },
+              });
+              review = await reviewDesignConsistency(reqDoc, planDoc);
+            }
+          }
+          if (review.verdict === "fail") {
+            // なお不整合 → needs_review を明示（実装前に人間確認）。
+            const reviewText =
+              "⚠️ 設計が要件と整合していない可能性があります（実装前に要レビュー）。\n\n" +
+              "指摘事項：\n" +
+              (review.reasons.length ? review.reasons.map((r) => `・${r}`).join("\n") : "・（理由詳細なし）") +
+              "\n\n設計書を見直すか、修正の上で再度進めてください。";
+            send({ type: "text", data: { agent: "agent2", chunk: `\n${reviewText}\n` } });
+            await prisma.message.create({
+              data: {
+                sessionId,
+                role: "agent2",
+                content: reviewText,
+                agentType: "pm",
+                metadata: { phase: "design_consistency_review" },
+              },
+            });
+          }
         }
       }
 
