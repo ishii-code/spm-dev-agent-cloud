@@ -25,14 +25,11 @@ export function isValidSlackMemberId(s: string): boolean {
 //  - choices なし（自由記述）: 最新の非空返信を採用。
 export function pickHitlAnswer(replies: string[], choices: string[]): string | null {
   if (choices.length > 0) {
-    // 返信全体が「番号のみ」（任意の末尾装飾 . ) 。番 : は許容）の時だけ採用。meta 文は除外。
-    const NUM_ONLY = /^\s*(\d+)\s*[.)．）。番:：]?\s*$/;
+    // 新しい順に、返信全体が「番号のみ」または「英字ラベルのみ(A/B/C/D…)」の時だけ採用。
+    // 番号⇔ラベル対応（A=1, B=2, …）で解決し、範囲外は invalid（採用しない）。meta 文は除外。
     for (let i = replies.length - 1; i >= 0; i--) {
-      const m = replies[i].trim().match(NUM_ONLY);
-      if (m) {
-        const n = Number.parseInt(m[1], 10);
-        if (n >= 1 && n <= choices.length) return choices[n - 1];
-      }
+      const idx = parseChoiceIndex(replies[i]);
+      if (idx !== null && idx >= 1 && idx <= choices.length) return choices[idx - 1];
     }
     return null;
   }
@@ -40,5 +37,16 @@ export function pickHitlAnswer(replies: string[], choices: string[]): string | n
     const t = replies[i].trim();
     if (t) return t;
   }
+  return null;
+}
+
+// 返信全体が「番号のみ」or「英字ラベル1文字のみ」なら 1 始まりの選択肢インデックスを返す。
+// 全角（１/Ａ 等）は NFKC で半角化してから判定。末尾装飾（. ) 。番 : 等）は許容。該当外は null。
+export function parseChoiceIndex(raw: string): number | null {
+  const t = (raw ?? "").normalize("NFKC").trim();
+  const num = t.match(/^(\d+)[.)．）。番:：]?$/);
+  if (num) return Number.parseInt(num[1], 10);
+  const letter = t.match(/^([A-Za-z])[.)．）。:：]?$/);
+  if (letter) return letter[1].toUpperCase().charCodeAt(0) - 64; // A=1, B=2, …
   return null;
 }
