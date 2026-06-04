@@ -146,16 +146,22 @@ export async function checkReactionOnce(
   return "pending";
 }
 
-// HITL 回答受理用：質問メッセージ(parentTs)のスレッド返信のうち、
-// 「指定ユーザー(SLACK_MENTION_USER_ID→ASK_USER_ID→既定 U0AMRAQDW65)の非bot返信」の
-// 最新テキストを返す。他者/bot/親メッセージは無視。channels:history/groups:history 必須。
-export async function readLatestUserReply(
+// HITL 回答受理用：質問メッセージ(parentTs=その質問を親とするスレッド)の返信のうち、
+// 「受理対象ユーザー(acceptUserIds)の非bot返信」テキストを時系列で返す。bot/親/他者は無視。
+// 受理対象は呼び出し側が owner.slackId∪固定ID で渡す（未指定なら従来の固定単独＝後方互換・anti-spoof）。
+// ※parentTs は「真のスレッド親」である必要がある（質問を root メッセージで投稿すること）。
+//   質問をプロジェクトスレッドにぶら下げると、返信はルートに付き conversations.replies(質問ts) に出ない。
+// channels:history/groups:history 必須。
+export async function readUserReplies(
   parentTs: string,
   channel: string = SLACK_CHANNEL,
-): Promise<string | null> {
-  if (!SLACK_TOKEN || !parentTs) return null;
-  const userId =
-    process.env.SLACK_MENTION_USER_ID ?? process.env.ASK_USER_ID ?? "U0AMRAQDW65";
+  acceptUserIds?: string[],
+): Promise<string[]> {
+  if (!SLACK_TOKEN || !parentTs) return [];
+  const accepted =
+    acceptUserIds && acceptUserIds.length
+      ? acceptUserIds
+      : [process.env.SLACK_MENTION_USER_ID ?? process.env.ASK_USER_ID ?? "U0AMRAQDW65"];
   try {
     const res = await fetch(
       `https://slack.com/api/conversations.replies?channel=${encodeURIComponent(channel)}&ts=${encodeURIComponent(parentTs)}&limit=50`,
@@ -168,20 +174,21 @@ export async function readLatestUserReply(
     };
     if (!data.ok) {
       console.warn(`[SLACK] conversations.replies failed (${channel}): ${data.error}`);
-      return null;
+      return [];
     }
-    const replies = (data.messages ?? []).filter(
-      (m) =>
-        m.ts !== parentTs &&
-        !m.bot_id &&
-        m.user === userId &&
-        (m.text ?? "").trim().length > 0,
-    );
-    if (replies.length === 0) return null;
-    return (replies[replies.length - 1].text ?? "").trim();
+    return (data.messages ?? [])
+      .filter(
+        (m) =>
+          m.ts !== parentTs &&
+          !m.bot_id &&
+          !!m.user &&
+          accepted.includes(m.user) &&
+          (m.text ?? "").trim().length > 0,
+      )
+      .map((m) => (m.text ?? "").trim());
   } catch (e) {
     console.warn(`[SLACK] conversations.replies error: ${e}`);
-    return null;
+    return [];
   }
 }
 
