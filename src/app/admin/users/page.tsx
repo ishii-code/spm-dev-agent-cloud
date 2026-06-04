@@ -17,6 +17,7 @@ export default async function AdminUsersPage() {
       createdAt: true,
       lastLoginAt: true,
       mustChangePassword: true,
+      slackId: true,
     },
   });
 
@@ -28,6 +29,7 @@ export default async function AdminUsersPage() {
     createdAt: u.createdAt.toISOString(),
     lastLoginAt: u.lastLoginAt ? u.lastLoginAt.toISOString() : null,
     mustChangePassword: u.mustChangePassword,
+    slackId: u.slackId,
   }));
 
   return <UsersClient users={serialized} currentUserId={session.userId} />;

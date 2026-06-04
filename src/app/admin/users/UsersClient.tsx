@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { isValidSlackMemberId } from "@/lib/slack-mention";
 
 type UserRow = {
   id: number;
@@ -11,6 +12,7 @@ type UserRow = {
   createdAt: string;
   lastLoginAt: string | null;
   mustChangePassword: boolean;
+  slackId: string | null;
 };
 
 const ERROR_MESSAGES: Record<string, string> = {
@@ -92,6 +94,33 @@ export function UsersClient({
     router.refresh();
   }
 
+  // Slack メンバーID（U…/W…形式）の設定/編集。空入力で解除。@ハンドル・表示名は不可。
+  async function handleEditSlackId(user: UserRow) {
+    const cur = user.slackId ?? "";
+    const input = window.prompt(
+      `${user.name} の Slack メンバーID を入力（U… / W… 形式。@ハンドルや表示名は不可。空で解除）`,
+      cur,
+    );
+    if (input === null) return; // キャンセル
+    const v = input.trim();
+    if (v !== "" && !isValidSlackMemberId(v)) {
+      alert("形式が不正です。Slack の『メンバーID』（U または W で始まる英数字。例 U0XXXXXXX）を入力してください。@ハンドルや表示名ではありません。");
+      return;
+    }
+    setBusyId(user.id);
+    const res = await fetch(`/api/admin/users/${user.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slackId: v === "" ? null : v }),
+    });
+    setBusyId(null);
+    if (!res.ok) {
+      alert("Slack ID の更新に失敗しました");
+      return;
+    }
+    router.refresh();
+  }
+
   return (
     <div className="mx-auto max-w-5xl space-y-4 p-6">
       <div className="flex items-end justify-between">
@@ -135,6 +164,7 @@ export function UsersClient({
               <th className="px-3 py-2 text-left">権限</th>
               <th className="px-3 py-2 text-left">作成日</th>
               <th className="px-3 py-2 text-left">最終ログイン</th>
+              <th className="px-3 py-2 text-left">Slack ID</th>
               <th className="px-3 py-2 text-right">操作</th>
             </tr>
           </thead>
@@ -153,6 +183,17 @@ export function UsersClient({
                 <td className="px-3 py-2">{u.role}</td>
                 <td className="px-3 py-2 text-slate-500">{fmt(u.createdAt)}</td>
                 <td className="px-3 py-2 text-slate-500">{fmt(u.lastLoginAt)}</td>
+                <td className="px-3 py-2 text-slate-600">
+                  <span className="font-mono text-xs">{u.slackId ?? "—"}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleEditSlackId(u)}
+                    disabled={busyId === u.id}
+                    className="ml-2 text-xs text-blue-600 hover:underline disabled:opacity-50"
+                  >
+                    {u.slackId ? "編集" : "設定"}
+                  </button>
+                </td>
                 <td className="px-3 py-2 text-right">
                   <button
                     type="button"
