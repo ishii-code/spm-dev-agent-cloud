@@ -1,6 +1,10 @@
 import { anthropic, MODEL, hasApiKey, describeAiError } from "../anthropic";
 import { openai, OPENAI_MODEL, hasOpenAiKey } from "../openai";
 
+// 判定エージェントに渡す議論履歴の最大文字数（Phase A：旧 3000 では前半の具体制約が
+// 落ちていたため大幅拡大）。context（=開発依頼）は別途常に先頭に含める。
+const JUDGE_HISTORY_CHARS = 15000;
+
 export type Domain = "medical" | "payment" | "security" | "personal_info" | "general";
 
 export function detectDomains(userRequest: string, targetLabel: string): Domain[] {
@@ -267,7 +271,9 @@ export async function orchestratorJudge(
         },
         {
           role: "user",
-          content: `${context}\n\n議論：\n${fullHistory.slice(-3000)}`,
+          // 履歴は十分に長く渡す（前半でユーザーが述べた部屋/面積/機器/動線/コスト等の
+          // 具体制約が判定から落ちないように）。context（=開発依頼）は常に先頭に含まれる。
+          content: `${context}\n\n議論：\n${fullHistory.slice(-JUDGE_HISTORY_CHARS)}`,
         },
       ],
     });
@@ -319,7 +325,8 @@ export async function createRequirementsDoc(
   const stream = await openai.chat.completions.create({
     model: OPENAI_MODEL,
     stream: true,
-    max_completion_tokens: 1500,
+    // Phase A：1500 では具体仕様の多い要件定義書が途中で切れて落ちていたため引上げ。
+    max_completion_tokens: 4000,
     messages: [
       {
         role: "system",

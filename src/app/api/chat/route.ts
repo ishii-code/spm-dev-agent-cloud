@@ -12,6 +12,11 @@ import {
 } from "@/lib/agents/debate";
 import { projectDocPath, readSystemCode, writeVaultFile } from "@/lib/obsidian";
 import { processMessageUrls } from "@/lib/url-fetch";
+import {
+  extractConstraints,
+  findMissingConstraints,
+  buildConstraintAppendix,
+} from "@/lib/requirements-constraints";
 import { validateChatRequest } from "@/lib/validation";
 import type { ClaudeMessage } from "@/types";
 
@@ -382,11 +387,30 @@ export async function POST(request: Request) {
 
         const requirementsDoc = await createRequirementsDoc(baseContext, history, emitText);
 
+        // 充足チェック（Phase A）：ユーザー提供の具体制約（部屋/面積/機器/動線/コスト等）が
+        // 要件定義書に反映されているか照合。未反映は (1) 逐語で自動転記（決定論・創作しない）。
+        const userText = [
+          originalRequest,
+          ...previousMessages.filter((m) => m.role === "user").map((m) => m.content),
+          message,
+        ].join("\n");
+        const constraints = extractConstraints(userText);
+        const missing = findMissingConstraints(constraints, requirementsDoc);
+        let finalDoc = requirementsDoc;
+        if (missing.length > 0) {
+          const appendix = buildConstraintAppendix(missing);
+          finalDoc = `${requirementsDoc}\n\n${appendix}`;
+          // UI にも転記分を流す（要件定義書バブルの続きとして表示）。
+          send({ type: "text", data: { agent: "orchestrator", chunk: `\n\n${appendix}\n` } });
+        }
+        // (2) 転記後もなお欠落（通常は空。norm 一致のため逐語転記で必ず充足する想定）。
+        const stillMissing = findMissingConstraints(constraints, finalDoc);
+
         await prisma.message.create({
           data: {
             sessionId,
             role: "orchestrator",
-            content: requirementsDoc,
+            content: finalDoc,
             agentType: "orchestrator",
             metadata: { phase: "requirements" },
           },
@@ -402,7 +426,7 @@ export async function POST(request: Request) {
         );
         let reqAbsolute: string | null = null;
         try {
-          reqAbsolute = await writeVaultFile(reqRelative, requirementsDoc);
+          reqAbsolute = await writeVaultFile(reqRelative, finalDoc);
         } catch (error) {
           const msg = error instanceof Error ? error.message : "unknown";
           send({ type: "error", data: { message: `Obsidian書込失敗: ${msg}` } });
@@ -412,7 +436,7 @@ export async function POST(request: Request) {
             projectId,
             type: "requirements",
             title: "要件定義書",
-            content: requirementsDoc,
+            content: finalDoc,
             obsidianPath: reqAbsolute,
           },
         });
@@ -426,6 +450,35 @@ export async function POST(request: Request) {
           },
         });
         send({ type: "agent_complete", data: { agentType: "orchestrator" } });
+
+        // (2) 逐語転記後もなお欠落が残る場合のみ、approval を出さずユーザーに確認/再質問。
+        // 通常は逐語転記で充足するため、このパスは安全弁（欠落の見落とし防止）。
+        if (stillMissing.length > 0) {
+          const miss = stillMissing.map((c) => `・${c.signal}（${c.category}）`).join("\n");
+          const holdText =
+            "要件定義書を作成しましたが、ご提供いただいた具体仕様の一部を確実に反映できていません。\n\n" +
+            "未反映の可能性がある項目：\n" +
+            `${miss}\n\n` +
+            "お手数ですが、これらの内容をもう一度ご記入ください（反映を確認してから次へ進みます）。";
+          send({ type: "text", data: { agent: "orchestrator", chunk: `\n${holdText}\n` } });
+          await prisma.message.create({
+            data: {
+              sessionId,
+              role: "orchestrator",
+              content: holdText,
+              agentType: "orchestrator",
+              metadata: { phase: "requirements_constraint_hold" },
+            },
+          });
+          // approval に進めず、議論待機を維持（次のユーザー返信で再 finalize 可能）。
+          await prisma.session.update({
+            where: { id: sessionId },
+            data: { status: "waiting_user" },
+          });
+          send({ type: "phase_complete", data: { phase: "debate" } });
+          send({ type: "done", data: { sessionId } });
+          return;
+        }
 
         const approvalText =
           "要件定義書が完成しました。\n\n" +
