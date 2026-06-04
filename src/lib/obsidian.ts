@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { formatJstDate } from "./time";
 
 const VAULT_PATH = process.env.OBSIDIAN_VAULT_PATH ?? "";
 
@@ -189,7 +190,7 @@ export async function saveSkillDocument(
   await fs.writeFile(filePath, content, "utf-8");
 
   const indexPath = path.join(skillDir, "00_スキルインデックス.md");
-  const date = new Date().toLocaleDateString("ja-JP");
+  const date = formatJstDate();
   const newEntry = `| [[${skillName}]] | ${date} | 自動生成 |\n`;
 
   try {

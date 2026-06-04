@@ -6,6 +6,7 @@
 // ワークスペースに再インストールすること。
 
 import { withMention } from "./slack";
+import { formatJst } from "./time";
 
 const SLACK_CHANNEL = process.env.SLACK_APPROVAL_CHANNEL ?? "C0B3D1S0LER";
 const SLACK_TOKEN = process.env.SLACK_BOT_TOKEN;
@@ -256,7 +257,7 @@ export async function waitForSlackApproval(
       `内容: ${description}\n\n` +
       `✅ をリアクションで *承認*\n` +
       `❌ をリアクションで *却下*\n\n` +
-      `_${new Date().toLocaleString("ja-JP")} | リアクションがあるまで待機します_`,
+      `_${formatJst()} | リアクションがあるまで待機します_`,
     threadTs,
   );
 
