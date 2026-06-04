@@ -100,3 +100,16 @@ export function buildUnreadableUrlNotice(text: string): string | null {
     "\n\nお手数ですが、参照してほしい内容をこのチャットに直接貼り付けてください。要件に反映します。"
   );
 }
+
+// 協議モデルへ渡す context/system 用のガード1文（推測・創作の防止）。
+// 読めない URL があるときだけ非空文字列を返す（無ければ ""）。
+// 取得未実装の Phase1 では「検知した URL = 読めていない URL」として扱う。
+export function buildUrlGuardForModel(text: string): string {
+  const urls = extractUrls(text);
+  if (urls.length === 0) return "";
+  return (
+    `【重要・URL注意】次のURLは読み取れていない：${urls.join(" , ")}。` +
+    `これらの内容を推測・創作して要件に反映しないこと。` +
+    `必要なら本文の貼り付けをユーザーに促す。`
+  );
+}

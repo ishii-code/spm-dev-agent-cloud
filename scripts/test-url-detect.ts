@@ -5,6 +5,7 @@ import {
   extractUrls,
   classifyUrl,
   buildUnreadableUrlNotice,
+  buildUrlGuardForModel,
 } from "../src/lib/url-detect";
 
 let passed = 0;
@@ -99,6 +100,23 @@ t("複数 URL を列挙", () => {
   assert.ok(out);
   assert.match(out!, /https:\/\/notion\.so\/a/);
   assert.match(out!, /https:\/\/example\.com\/b/);
+});
+
+console.log("buildUrlGuardForModel");
+t("URL 無しは空文字（注入なし）", () => {
+  assert.equal(buildUrlGuardForModel("URLなし"), "");
+});
+t("読めない URL があれば推測禁止ガードを返す", () => {
+  const g = buildUrlGuardForModel("仕様は https://notion.so/x 参照");
+  assert.match(g, /読み取れていない/);
+  assert.match(g, /https:\/\/notion\.so\/x/);
+  assert.match(g, /推測・創作して要件に反映しないこと/);
+  assert.match(g, /貼り付け/);
+});
+t("複数 URL を列挙してガードに含む", () => {
+  const g = buildUrlGuardForModel("https://a.com と https://b.com");
+  assert.match(g, /https:\/\/a\.com/);
+  assert.match(g, /https:\/\/b\.com/);
 });
 
 console.log(`\n✅ all ${passed} tests passed`);
