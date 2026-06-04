@@ -1,4 +1,25 @@
 import { withMention } from "./slack";
+import { formatJst } from "./time";
+
+// 通知タイトル整形（B2）：登録者名プレフィックス。ownerName=User.name、未設定時は "ごう"。
+export function formatProjectLabel(ownerName: string | null | undefined, projectTitle: string): string {
+  const name = (ownerName ?? "").trim() || "ごう";
+  return `【${name}】${projectTitle}`;
+}
+
+// projectId から登録者(owner)名を取得（失敗・未設定は "ごう" にフォールバック）。
+async function projectOwnerName(projectId: string): Promise<string> {
+  try {
+    const { prisma } = await import("./prisma");
+    const p = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { owner: { select: { name: true } } },
+    });
+    return p?.owner?.name?.trim() || "ごう";
+  } catch {
+    return "ごう";
+  }
+}
 
 const SLACK_CHANNEL = "C0B3D1S0LER";
 const SLACK_TOKEN = process.env.SLACK_BOT_TOKEN;
@@ -81,10 +102,11 @@ export async function notifyExecutionStart(
   targetRepo: string,
   _startTime: number
 ): Promise<string | undefined> {
+  const ownerName = await projectOwnerName(projectId);
   const ts = await postSlack(
-    `🚀 *【${projectTitle}】開発開始*\n` +
+    `🚀 *${formatProjectLabel(ownerName, projectTitle)} 開発開始*\n` +
       `対象: \`${targetRepo}\`\n` +
-      `時刻: ${new Date().toLocaleString("ja-JP")}\n` +
+      `時刻: ${formatJst()}\n` +
       `確認: ${appBaseUrl()}`
   );
   if (ts) {
@@ -120,7 +142,8 @@ export async function notifyComplete(
   const sec = Math.round((Date.now() - startTime) / 1000);
   const emoji = success ? "✅" : "❌";
   const label = success ? "実装完了" : "エラーが発生しました";
-  await notifyThread(projectId, `${emoji} *【${projectTitle}】${label}*\n所要時間: ${sec}秒`);
+  const ownerName = await projectOwnerName(projectId);
+  await notifyThread(projectId, `${emoji} *${formatProjectLabel(ownerName, projectTitle)} ${label}*\n所要時間: ${sec}秒`);
 }
 
 export async function notifySecurityApproval(
