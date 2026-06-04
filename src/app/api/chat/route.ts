@@ -641,7 +641,7 @@ export async function POST(request: Request) {
               return /^Q\d+/.test(t) ? t : `Q${i + 1}\n${t}`;
             })
             .join("\n\n");
-          originalQuestionsText = "ごうさんへの確認事項：\n\n" + formattedQuestions;
+          originalQuestionsText = `${ownerName}さんへの確認事項：\n\n` + formattedQuestions;
         } else {
           const lastOrch = [...previousMessages]
             .reverse()
@@ -668,13 +668,13 @@ export async function POST(request: Request) {
         }
         if (/^b\b|追加|requirement/i.test(trimmed)) {
           console.log("[CHAT] continuation: add requirements");
-          currentHistory += `\n\nごうさんからの追加要件・制約：${message}`;
+          currentHistory += `\n\n${ownerName}さんからの追加要件・制約：${message}`;
         } else if (/^a\b|続ける|continue/i.test(trimmed)) {
           console.log("[CHAT] continuation: continue debate");
           // no-op; そのまま次ラウンド
         } else {
           console.log("[CHAT] continuation: free comment");
-          currentHistory += `\n\nごうさんからの追加コメント：${message}`;
+          currentHistory += `\n\n${ownerName}さんからの追加コメント：${message}`;
         }
       } else if (ctx.pendingQuestions && ctx.pendingQuestions.length > 0) {
         currentHistory +=
@@ -744,7 +744,7 @@ export async function POST(request: Request) {
           })
           .join("\n\n");
         const questionText =
-          "ごうさんへの確認事項：\n\n" + formattedQuestions;
+          `${ownerName}さんへの確認事項：\n\n` + formattedQuestions;
         console.log("[CHAT] ask_user emit:", questionText.slice(0, 160));
         send({
           type: "text",
