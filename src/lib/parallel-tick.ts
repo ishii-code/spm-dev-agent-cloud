@@ -5,6 +5,13 @@ import { projectsRoot } from "./repos";
 import { parseAskHuman } from "./ask-human";
 import { pickMentionId, pickHitlAnswer } from "./slack-mention";
 import {
+  detectChanges,
+  detectBoilerplate,
+  runBuildCheck,
+  buildCriticPrompt,
+  parseVerifyVerdict,
+} from "./verify";
+import {
   startClaudeCodeDetached,
   checkClaudeCode,
 } from "./claude-code-runner";
@@ -82,6 +89,12 @@ async function resolveSlackTarget(project: {
 // SKIP_APPROVAL=true で承認をスキップ（開発・テスト用退避口）。
 function skipApprovalEnabled(): boolean {
   return process.env.SKIP_APPROVAL === "true";
+}
+
+// 検証ゲート（Phase D）。OFF（既定）＝従来どおり markProjectDone を即実行＝挙動完全不変。
+// "1" / "true" で ON（VM のみ。Cloud Run は isExecHost()=false で verifying に入らない）。
+function verifyBeforeDoneEnabled(): boolean {
+  return process.env.VERIFY_BEFORE_DONE === "1" || process.env.VERIFY_BEFORE_DONE === "true";
 }
 
 // SlackTarget 経由でメッセージ投稿（失敗は握りつぶす）。target が null なら何もしない。
@@ -197,7 +210,11 @@ export type TickAdvancedReason =
   | "scaffolded"
   | "needs_human"
   | "human_answered"
-  | "blocked";
+  | "blocked"
+  | "verifying"
+  | "verify_progress"
+  | "needs_review"
+  | "verified_done";
 
 export type TickResult =
   | { status: "busy" }
@@ -756,14 +773,29 @@ async function processOneTickInner(
   if (project.parallelStatus === "scaffolding") {
     return await advanceScaffolding(project, slack);
   }
+  // 検証ゲート（Phase D）：verifying（3層検証）/ needs_review（人間レビュー待ち）は専用 advance。VM 限定。
+  if (project.parallelStatus === "verifying" || project.parallelStatus === "needs_review") {
+    return await advanceVerification(project, slack);
+  }
   if (project.parallelStatus !== "running") {
     return { status: "no_op", reason: "not_running" };
   }
 
   const workingDir = project.parallelWorkingDir ?? process.cwd();
 
-  // E) 非終端パートが 0 件 → done 化（markProjectDone が atomic claim で冪等化）
+  // E) 非終端パートが 0 件 → 完了処理。
   if (!(await hasNonTerminal(projectId))) {
+    // VERIFY_BEFORE_DONE=ON かつ VM(isExecHost) のときだけ verifying を挟む。
+    // OFF（既定）/Cloud Run は従来どおり markProjectDone を即実行＝挙動不変。
+    if (verifyBeforeDoneEnabled() && isExecHost()) {
+      const claimed = await prisma.project.updateMany({
+        where: { id: projectId, parallelStatus: "running" },
+        data: { parallelStatus: "verifying" },
+      });
+      if (claimed.count === 0) return { status: "no_op", reason: "verify_claim_lost" };
+      console.log(`[TICK] project=${projectId} → verifying（検証ゲート）`);
+      return { status: "advanced", reason: "verifying" };
+    }
     await markProjectDone(projectId, project.title, slack);
     return { status: "done" };
   }
@@ -1107,6 +1139,193 @@ async function advanceWaitingForHuman(
   }
 
   return { status: "no_op", reason: "awaiting_human" };
+}
+
+// ===========================================================================
+// 検証ゲート（Phase D）：verifying（4層検証）/ needs_review（人間レビュー）。VM 限定。
+// 検証メタは sentinel Document(type:"verification") に保持（HITL 列を流用）：
+//   executionStatus: pending→build_running→critic_running→passed / needs_review / overridden
+//   execPid/execDoneFile: build/critic の detached 実行（inspectExec で判定）
+//   humanQuestion: needs_review の理由（reasons）/ humanQuestionTs: 🔎 投稿 ts（override poll 用）
+// 層：① 変更検知 → ①.5 ボイラープレート検知（決定論） → ② build → ③ critic（仕様充足）
+// ===========================================================================
+type VerifyProject = {
+  id: string;
+  title: string;
+  parallelWorkingDir: string | null;
+  parallelStatus: string | null;
+};
+
+async function advanceVerification(
+  project: VerifyProject,
+  slack: SlackTarget | null,
+): Promise<TickResult> {
+  if (!isExecHost()) return { status: "no_op", reason: "exec_host_only" };
+  const projectId = project.id;
+  const sentinel = await prisma.document.findFirst({
+    where: { projectId, type: "verification" },
+    orderBy: { createdAt: "desc" },
+  });
+
+  // needs_review：override(✅/承認) → done ／ 再検証 → verifying。
+  if (project.parallelStatus === "needs_review") {
+    if (!sentinel) return { status: "no_op", reason: "verify_no_sentinel" };
+    const ch = slack?.channel ?? approvalChannel();
+    const ts = sentinel.humanQuestionTs;
+    if (ts) {
+      const replies = await readUserReplies(ts, ch);
+      const reverify = replies.some((r) => /再検証|recheck|re-?verify/i.test(r));
+      const approve = replies.some((r) => /完了|承認|approve|done|ok/i.test(r));
+      if (reverify) {
+        await prisma.document.update({
+          where: { id: sentinel.id },
+          data: { executionStatus: "pending", execPid: null, execDoneFile: null, humanQuestionTs: null },
+        });
+        await prisma.project.updateMany({
+          where: { id: projectId, parallelStatus: "needs_review" },
+          data: { parallelStatus: "verifying" },
+        });
+        await notifySlack(slack, `🔁 *【${project.title}】再検証を開始*`).catch(() => {});
+        return { status: "advanced", reason: "verifying" };
+      }
+      if (approve) {
+        return await finalizeOverrideDone(project, slack, sentinel.id, "reply:承認");
+      }
+      const r = await checkReactionOnce(ts, ch);
+      if (r === "approved") return await finalizeOverrideDone(project, slack, sentinel.id, "reaction:✅");
+    }
+    return { status: "no_op", reason: "needs_review_waiting" };
+  }
+
+  // verifying：4層検証
+  const cwd = project.parallelWorkingDir;
+  if (!cwd) return await finalizeNeedsReview(project, slack, sentinel?.id ?? null, ["作業ディレクトリ未設定で検証不能"]);
+  const sid =
+    sentinel?.id ??
+    (await prisma.document.create({
+      data: { projectId, type: "verification", title: "検証", content: "", executionStatus: "pending" },
+      select: { id: true },
+    })).id;
+  const st = sentinel?.executionStatus ?? "pending";
+
+  if (st === "pending") {
+    const ch = detectChanges(cwd); // 層①：変更検知
+    if (!ch.changed) return await finalizeNeedsReview(project, slack, sid, [`変更未検出: ${ch.summary}`]);
+    const bp = detectBoilerplate(cwd); // 層①.5：ボイラープレート検知（決定論）
+    if (bp.isBoilerplate) return await finalizeNeedsReview(project, slack, sid, bp.reasons);
+    const b = runBuildCheck(cwd); // 層②：build（detached）
+    await prisma.document.update({
+      where: { id: sid },
+      data: { executionStatus: "build_running", execPid: b.pid, execDoneFile: b.doneFile, executionLog: `[verify] build pid=${b.pid}` },
+    });
+    console.log(`[TICK] project=${projectId} verify: 層①/①.5 OK → build 起動`);
+    return { status: "advanced", reason: "verify_progress" };
+  }
+
+  if (st === "build_running") {
+    const inspect = await inspectExec(sentinel?.execDoneFile ?? "", sentinel?.execPid ?? null);
+    if (inspect.status === "running") return { status: "no_op", reason: "verify_build_running" };
+    if (inspect.status === "failed") {
+      return await finalizeNeedsReview(project, slack, sid, ["ビルド失敗", (inspect.log || "").slice(-800)]);
+    }
+    // build success → 層③ critic
+    const [reqDoc, sprintDoc] = await Promise.all([
+      prisma.document.findFirst({ where: { projectId, type: "requirements" }, orderBy: { createdAt: "desc" } }),
+      prisma.document.findFirst({ where: { projectId, type: "sprint" }, orderBy: { createdAt: "desc" } }),
+    ]);
+    const accCwd = await ensureAccessibleCwd(cwd).catch(() => null);
+    if (!accCwd) return await finalizeNeedsReview(project, slack, sid, ["critic 用 cwd アクセス不可"]);
+    let spawned;
+    try {
+      spawned = await startClaudeCodeDetached(
+        buildCriticPrompt(reqDoc?.content ?? "", sprintDoc?.content ?? "", accCwd),
+        accCwd,
+        "検証critic",
+      );
+    } catch (e) {
+      return await finalizeNeedsReview(project, slack, sid, [`critic 起動失敗: ${e instanceof Error ? e.message : String(e)}`]);
+    }
+    await prisma.document.update({
+      where: { id: sid },
+      data: { executionStatus: "critic_running", execPid: spawned.pid, execDoneFile: spawned.doneFile, executionLog: `[verify] critic pid=${spawned.pid}` },
+    });
+    console.log(`[TICK] project=${projectId} verify: 層②build OK → critic 起動`);
+    return { status: "advanced", reason: "verify_progress" };
+  }
+
+  if (st === "critic_running") {
+    const inspect = await inspectExec(sentinel?.execDoneFile ?? "", sentinel?.execPid ?? null);
+    if (inspect.status === "running") return { status: "no_op", reason: "verify_critic_running" };
+    const verdict = parseVerifyVerdict(inspect.log ?? ""); // 層③：parse 失敗=fail 安全側
+    if (verdict.verdict === "pass") return await finalizeVerifiedDone(project, slack, sid);
+    return await finalizeNeedsReview(project, slack, sid, verdict.reasons.length ? verdict.reasons : ["critic: fail（理由なし）"]);
+  }
+
+  return { status: "no_op", reason: "verify_unknown_state" };
+}
+
+// 検証クリーン → 完了。sentinel passed、markProjectDone（parallelStatus=done）、✅ 通知。
+async function finalizeVerifiedDone(
+  project: VerifyProject,
+  slack: SlackTarget | null,
+  sentinelId: string,
+): Promise<TickResult> {
+  await prisma.document.update({ where: { id: sentinelId }, data: { executionStatus: "passed" } }).catch(() => {});
+  await notifySlack(slack, `✅ *【${project.title}】検証OK*（変更/ボイラープレート/ビルド/批評すべて通過）`).catch(() => {});
+  await markProjectDone(project.id, project.title, slack);
+  console.log(`[TICK] project=${project.id} verify → done`);
+  return { status: "advanced", reason: "verified_done" };
+}
+
+// 検証で問題 → needs_review。理由を sentinel に記録、🔎 通知（ts を override poll 用に保持）。自動進行しない。
+async function finalizeNeedsReview(
+  project: VerifyProject,
+  slack: SlackTarget | null,
+  sentinelId: string | null,
+  reasons: string[],
+): Promise<TickResult> {
+  const reasonText = reasons.filter(Boolean).join("\n- ");
+  await prisma.project.updateMany({
+    where: { id: project.id, parallelStatus: { in: ["verifying", "running"] } },
+    data: { parallelStatus: "needs_review" },
+  });
+  const ts = await notifySlack(
+    slack,
+    `🔎 *【${project.title}】検証で要確認*\n- ${reasonText}\n（修正後にスレッドで「再検証」、問題なければ ✅ で完了承認）`,
+  ).catch(() => "");
+  if (sentinelId) {
+    await prisma.document
+      .update({
+        where: { id: sentinelId },
+        data: {
+          executionStatus: "needs_review",
+          humanQuestion: reasonText.slice(0, 4000), // 用途：検証の要確認理由（reasons）
+          humanQuestionTs: ts || null,
+          humanAskedAt: new Date(),
+          execPid: null,
+          execDoneFile: null,
+        },
+      })
+      .catch(() => {});
+  }
+  console.log(`[TICK] project=${project.id} verify → needs_review`);
+  return { status: "advanced", reason: "needs_review" };
+}
+
+// 人間 override（✅/承認 reply）→ done。
+async function finalizeOverrideDone(
+  project: VerifyProject,
+  slack: SlackTarget | null,
+  sentinelId: string,
+  how: string,
+): Promise<TickResult> {
+  await prisma.document
+    .update({ where: { id: sentinelId }, data: { executionStatus: "overridden", humanAnswer: how.slice(0, 200) } })
+    .catch(() => {});
+  await notifySlack(slack, `✅ *【${project.title}】人間レビューで完了承認*（${how}）`).catch(() => {});
+  await markProjectDone(project.id, project.title, slack);
+  console.log(`[TICK] project=${project.id} needs_review → override done (${how})`);
+  return { status: "advanced", reason: "verified_done" };
 }
 
 // B) awaiting_approval → リアクションを 1 回だけ確認
