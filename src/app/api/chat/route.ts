@@ -11,6 +11,7 @@ import {
   type Domain,
 } from "@/lib/agents/debate";
 import { projectDocPath, readSystemCode, writeVaultFile } from "@/lib/obsidian";
+import { buildUnreadableUrlNotice } from "@/lib/url-detect";
 import { validateChatRequest } from "@/lib/validation";
 import type { ClaudeMessage } from "@/types";
 
@@ -140,6 +141,26 @@ export async function POST(request: Request) {
       }
       if (key) send({ type: "text", data: { agent: key, chunk: text } });
     };
+
+    // ===================================================================
+    // URL 通知（Phase1）：発言に URL が含まれていたら、取得不可を黙殺せず
+    // 理由付きバブルで先に返す。要件協議の本処理（下記ケース）は通常どおり続行。
+    // ===================================================================
+    const urlNotice = buildUnreadableUrlNotice(message);
+    if (urlNotice) {
+      send({ type: "text", data: { agent: "orchestrator", chunk: urlNotice } });
+      await prisma.message.create({
+        data: {
+          sessionId,
+          role: "orchestrator",
+          content: urlNotice,
+          agentType: "orchestrator",
+          metadata: { phase: "url_notice" },
+        },
+      });
+      // 後続の phase_start が orchestrator バッファをクリアするため、
+      // この通知バブルは確定し、本処理は新規バブルに分離される。
+    }
 
     // ===================================================================
     // PM (Agent2) helper：approved 後の設計書生成・保存・完了処理
