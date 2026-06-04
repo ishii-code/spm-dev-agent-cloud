@@ -10,6 +10,7 @@ import {
 } from "@/lib/api-auth";
 import { generateInitialInterview } from "@/lib/agents/debate";
 import { readSystemCode } from "@/lib/obsidian";
+import { buildUnreadableUrlNotice, buildUrlGuardForModel } from "@/lib/url-detect";
 
 export const runtime = "nodejs";
 
@@ -204,6 +205,20 @@ export async function POST(request: Request) {
         await prisma.message.create({
           data: { sessionId, role: "user", content: firstMessage },
         });
+        // URL 通知（chat route と同じ2段）：読めない URL があれば、理由バブルを
+        // orchestrator Message として保存（SSE は無いので保存のみ＝UI 再読込で表示）。
+        const urlNotice = buildUnreadableUrlNotice(firstMessage);
+        if (urlNotice) {
+          await prisma.message.create({
+            data: {
+              sessionId,
+              role: "orchestrator",
+              content: urlNotice,
+              agentType: "orchestrator",
+              metadata: { phase: "url_notice" },
+            },
+          });
+        }
         // 既存コード概要（あれば）
         let systemCode = "";
         if (project.targetSystem) {
@@ -214,9 +229,12 @@ export async function POST(request: Request) {
           }
         }
         const targetLabelForChat = project.targetLabel ?? project.targetSystem ?? "";
+        // URL ガードはモデル入力にだけ付与（保存済み user メッセージ・debateContext は元のまま）。
+        const urlGuard = buildUrlGuardForModel(firstMessage);
+        const interviewInput = urlGuard ? `${firstMessage}\n\n${urlGuard}` : firstMessage;
         // 初期ヒアリングを生成（SSE 不要なので onOutput は no-op）
         const interview = await generateInitialInterview(
-          firstMessage,
+          interviewInput,
           systemCode,
           targetLabelForChat,
           project.projectType,
