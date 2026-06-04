@@ -10,7 +10,7 @@ import {
 } from "@/lib/api-auth";
 import { generateInitialInterview } from "@/lib/agents/debate";
 import { readSystemCode } from "@/lib/obsidian";
-import { buildUnreadableUrlNotice, buildUrlGuardForModel } from "@/lib/url-detect";
+import { processMessageUrls } from "@/lib/url-fetch";
 
 export const runtime = "nodejs";
 
@@ -205,15 +205,18 @@ export async function POST(request: Request) {
         await prisma.message.create({
           data: { sessionId, role: "user", content: firstMessage },
         });
-        // URL 通知（chat route と同じ2段）：読めない URL があれば、理由バブルを
-        // orchestrator Message として保存（SSE は無いので保存のみ＝UI 再読込で表示）。
-        const urlNotice = buildUnreadableUrlNotice(firstMessage);
-        if (urlNotice) {
+        // URL 取り扱い（chat route と同じ）：取得試行→読めた本文はモデル入力へ注入、
+        // 読めない/失敗は理由バブルを orchestrator Message として保存（SSE 無し＝再読込で表示）。
+        const urlResult = await processMessageUrls(firstMessage);
+        const urlModelExtra = [urlResult.injection, urlResult.guard]
+          .filter(Boolean)
+          .join("\n\n");
+        if (urlResult.notice) {
           await prisma.message.create({
             data: {
               sessionId,
               role: "orchestrator",
-              content: urlNotice,
+              content: urlResult.notice,
               agentType: "orchestrator",
               metadata: { phase: "url_notice" },
             },
@@ -229,9 +232,8 @@ export async function POST(request: Request) {
           }
         }
         const targetLabelForChat = project.targetLabel ?? project.targetSystem ?? "";
-        // URL ガードはモデル入力にだけ付与（保存済み user メッセージ・debateContext は元のまま）。
-        const urlGuard = buildUrlGuardForModel(firstMessage);
-        const interviewInput = urlGuard ? `${firstMessage}\n\n${urlGuard}` : firstMessage;
+        // モデル入力にだけ付与（保存済み user メッセージ・debateContext は元のまま）。
+        const interviewInput = urlModelExtra ? `${firstMessage}\n\n${urlModelExtra}` : firstMessage;
         // 初期ヒアリングを生成（SSE 不要なので onOutput は no-op）
         const interview = await generateInitialInterview(
           interviewInput,

@@ -1,12 +1,7 @@
 // url-detect.ts のテストハーネス（tsx で実行： npx tsx scripts/test-url-detect.ts）。
 // 正式テストFW未導入のため、node:assert による自己完結ハーネス（既存慣習に準拠）。
 import assert from "node:assert/strict";
-import {
-  extractUrls,
-  classifyUrl,
-  buildUnreadableUrlNotice,
-  buildUrlGuardForModel,
-} from "../src/lib/url-detect";
+import { extractUrls, classifyUrl } from "../src/lib/url-detect";
 
 let passed = 0;
 function t(name: string, fn: () => void) {
@@ -74,49 +69,6 @@ t("末尾一致のなりすまし回避（notion.so.evil.com は no_tool）", ()
     classifyUrl("https://notion.so.evil.com/x").reason,
     "no_tool",
   );
-});
-
-console.log("buildUnreadableUrlNotice");
-t("URL 無しは null（バブル不要）", () => {
-  assert.equal(buildUnreadableUrlNotice("URLなし"), null);
-});
-t("auth_required の文面を含む", () => {
-  const out = buildUnreadableUrlNotice("https://notion.so/x を参照");
-  assert.ok(out);
-  assert.match(out!, /読み取れませんでした/);
-  assert.match(out!, /認証が必要/);
-  assert.match(out!, /https:\/\/notion\.so\/x/);
-  assert.match(out!, /貼り付け/);
-});
-t("no_tool の文面を含む", () => {
-  const out = buildUnreadableUrlNotice("https://example.com/x");
-  assert.ok(out);
-  assert.match(out!, /自動取得する手段がない/);
-});
-t("複数 URL を列挙", () => {
-  const out = buildUnreadableUrlNotice(
-    "https://notion.so/a と https://example.com/b",
-  );
-  assert.ok(out);
-  assert.match(out!, /https:\/\/notion\.so\/a/);
-  assert.match(out!, /https:\/\/example\.com\/b/);
-});
-
-console.log("buildUrlGuardForModel");
-t("URL 無しは空文字（注入なし）", () => {
-  assert.equal(buildUrlGuardForModel("URLなし"), "");
-});
-t("読めない URL があれば推測禁止ガードを返す", () => {
-  const g = buildUrlGuardForModel("仕様は https://notion.so/x 参照");
-  assert.match(g, /読み取れていない/);
-  assert.match(g, /https:\/\/notion\.so\/x/);
-  assert.match(g, /推測・創作して要件に反映しないこと/);
-  assert.match(g, /貼り付け/);
-});
-t("複数 URL を列挙してガードに含む", () => {
-  const g = buildUrlGuardForModel("https://a.com と https://b.com");
-  assert.match(g, /https:\/\/a\.com/);
-  assert.match(g, /https:\/\/b\.com/);
 });
 
 console.log(`\n✅ all ${passed} tests passed`);

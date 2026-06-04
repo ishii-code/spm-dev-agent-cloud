@@ -11,7 +11,7 @@ import {
   type Domain,
 } from "@/lib/agents/debate";
 import { projectDocPath, readSystemCode, writeVaultFile } from "@/lib/obsidian";
-import { buildUnreadableUrlNotice, buildUrlGuardForModel } from "@/lib/url-detect";
+import { processMessageUrls } from "@/lib/url-fetch";
 import { validateChatRequest } from "@/lib/validation";
 import type { ClaudeMessage } from "@/types";
 
@@ -143,20 +143,21 @@ export async function POST(request: Request) {
     };
 
     // ===================================================================
-    // URL 通知（Phase1）：発言に URL が含まれていたら、取得不可を黙殺せず
-    // 理由付きバブルで先に返す。要件協議の本処理（下記ケース）は通常どおり続行。
-    // ===================================================================
-    // 協議モデルへ渡すガード文（読めない URL があるときだけ非空）。
+    // URL 取り扱い（Phase2）：発言中の URL を取得試行。読めたら本文をモデル入力へ
+    // 注入（要約せず上限付き）、読めない/失敗は黙殺せず理由バブル＋推測禁止ガード。
     // DB 保存値・originalRequest は汚さず、モデル入力にのみ後付けする。
-    const urlGuard = buildUrlGuardForModel(message);
-    const urlNotice = buildUnreadableUrlNotice(message);
-    if (urlNotice) {
-      send({ type: "text", data: { agent: "orchestrator", chunk: urlNotice } });
+    // ===================================================================
+    const urlResult = await processMessageUrls(message);
+    const urlModelExtra = [urlResult.injection, urlResult.guard]
+      .filter(Boolean)
+      .join("\n\n");
+    if (urlResult.notice) {
+      send({ type: "text", data: { agent: "orchestrator", chunk: urlResult.notice } });
       await prisma.message.create({
         data: {
           sessionId,
           role: "orchestrator",
-          content: urlNotice,
+          content: urlResult.notice,
           agentType: "orchestrator",
           metadata: { phase: "url_notice" },
         },
@@ -255,7 +256,7 @@ export async function POST(request: Request) {
         ? message
         : (previousMessages.find((m) => m.role === "user")?.content ?? message);
       // URL ガードはモデル入力（設計書生成元）にだけ付与。保存用 originalRequest は元のまま。
-      const reqDocForModel = urlGuard ? `${reqDoc}\n\n${urlGuard}` : reqDoc;
+      const reqDocForModel = urlModelExtra ? `${reqDoc}\n\n${urlModelExtra}` : reqDoc;
       await runPmFlow(reqDocForModel, reqDoc);
       send({ type: "phase_complete", data: { phase: "design" } });
       send({ type: "done", data: { sessionId } });
@@ -281,7 +282,7 @@ export async function POST(request: Request) {
       send({ type: "agent", data: { agent: "orchestrator", status: "thinking" } });
 
       // URL ガードはモデル入力にだけ付与（DB の user メッセージ・originalRequest は元のまま）。
-      const interviewInput = urlGuard ? `${message}\n\n${urlGuard}` : message;
+      const interviewInput = urlModelExtra ? `${message}\n\n${urlModelExtra}` : message;
       const interview = await generateInitialInterview(
         interviewInput,
         systemCode,
@@ -359,8 +360,8 @@ export async function POST(request: Request) {
         `開発依頼：${originalRequest}\n` +
         `対象：${targetLabel}（${session.project.projectType === "existing" ? "既存システムへの追加" : "新規開発"}）\n` +
         `既存コード概要：${systemCode.substring(0, 2000)}` +
-        // この返信に読めない URL があれば、推測・創作を防ぐガードをモデル context に付与。
-        (urlGuard ? `\n\n${urlGuard}` : "");
+        // 読めた URL 本文の注入＋読めない URL の推測禁止ガードをモデル context に付与。
+        (urlModelExtra ? `\n\n${urlModelExtra}` : "");
 
       const domains: Domain[] =
         ctx.domains && ctx.domains.length > 0
