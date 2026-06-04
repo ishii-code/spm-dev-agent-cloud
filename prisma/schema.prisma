@@ -56,6 +56,9 @@ model User {
   // 承認/HITL 通知でメンションするオーナーの Slack User ID（U...）。未設定なら
   // Project.creatorSlackId → 固定 SLACK_MENTION_USER_ID にフォールバック（Phase3 で使用）。
   slackId             String?   @map("slack_id")
+  // Slack ID の動作確認（users.info で実在ユーザーに解決）済み時刻。null＝未検証。
+  // additive・nullable。プロジェクト作成 gate（Phase3.2）の判定に使用。
+  slackIdVerifiedAt   DateTime? @map("slack_id_verified_at")
   lastLoginAt         DateTime? @map("last_login_at")
   createdAt           DateTime  @default(now()) @map("created_at")
   updatedAt           DateTime  @updatedAt @map("updated_at")

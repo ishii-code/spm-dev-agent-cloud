@@ -117,6 +117,23 @@ export async function POST(request: Request) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
+  // Slack ID 動作確認 gate（Phase3.2-c）：user 起点の作成（owner 解決済み）は
+  // slackIdVerifiedAt が無いと 403。admin 含む全員に適用。owner=null（service-key の
+  // 自動経路・レガシー）は対象外（人手の登録導線が無いため）。
+  if (ownerUserId != null) {
+    const owner = await prisma.user.findUnique({
+      where: { id: ownerUserId },
+      select: { slackIdVerifiedAt: true },
+    });
+    if (!owner?.slackIdVerifiedAt) {
+      console.warn(`[PROJECTS_API] slack_id_required ownerId=${ownerUserId}`);
+      return Response.json(
+        { error: "slack_id_required", message: "Slack ID を登録してください（設定画面で動作確認が必要です）" },
+        { status: 403 },
+      );
+    }
+  }
+
   let body: unknown;
   try {
     body = await request.json();

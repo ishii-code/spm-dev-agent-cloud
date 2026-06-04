@@ -1389,7 +1389,7 @@ export function ChatWorkspace({
           )}
           {activeProjectId && messages.length === 0 && (
             <div className="text-center text-peco-text-muted mt-20">
-              ごうさん、依頼を入力してください。Orchestratorが受け取ります。
+              依頼を入力してください。Orchestratorが受け取ります。
             </div>
           )}
           {(() => {
@@ -2918,7 +2918,7 @@ const AGENT_STYLES: Record<
   { label: string; icon: string; bgClass: string; align: "left" | "right" }
 > = {
   user: {
-    label: "ごう",
+    label: "あなた",
     icon: "👤",
     bgClass: "bg-peco-primary text-peco-gray-900",
     align: "right",

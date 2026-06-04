@@ -238,6 +238,7 @@ export async function orchestratorJudge(
   fullHistory: string,
   domains: Domain[] = ["general"],
   round: number = 1,
+  ownerName: string = "ごう",
 ): Promise<OrchestratorJudgment> {
   const domainNames = domains.filter((d) => d !== "general").join("・");
   const domainNote = domainNames
@@ -257,7 +258,7 @@ export async function orchestratorJudge(
             `actionは continue_debate / ask_user / finalize のいずれか。\n` +
             `現在は第${round}ラウンドです。\n` +
             `第1ラウンドは ask_user。\n` +
-            `【最重要】議論履歴を読み、ごうさんが既に回答した質問・論点は二度と質問しないこと。同じ趣旨の質問の繰り返しは固く禁止。\n` +
+            `【最重要】議論履歴を読み、${ownerName}さんが既に回答した質問・論点は二度と質問しないこと。同じ趣旨の質問の繰り返しは固く禁止。\n` +
             `ask_user は「まだ一度も聞いていない新しい重要論点」がある場合のみ選ぶ。\n` +
             `新しい重要論点が残っていない、または第3ラウンド以降は finalize を選ぶこと。\n` +
             `未確定（「これから確認する」等）の回答があっても、それはユーザー側TODOとして要件定義書に明記すればよく、再質問の理由にしてはならない。\n\n` +
@@ -265,7 +266,7 @@ export async function orchestratorJudge(
             `各質問は必ず以下の形式の1つの文字列として出力すること：\n` +
             `Q1\n質問テキスト（1行）\nA 選択肢A\nB 選択肢B\nC 選択肢C（「未定・その他」を常に入れる）\n\n` +
             `選択肢は必ず3つ以上。自由記述のみの質問は禁止。\n` +
-            `ごうさんが素早く答えられるように選択肢を具体的にすること。` +
+            `${ownerName}さんが素早く答えられるように選択肢を具体的にすること。` +
             (domainNames ? `\n関連ドメイン：${domainNames}` : "") +
             domainNote,
         },
@@ -318,6 +319,7 @@ export async function createRequirementsDoc(
   context: string,
   fullHistory: string,
   onOutput: (agentType: string, text: string) => void,
+  ownerName: string = "ごう",
 ): Promise<string> {
   let doc = "";
   onOutput("orchestrator", "");
@@ -364,7 +366,7 @@ Could: [記載]
 議論で合意した点
 [エージェント間で【合意】となった内容を列挙]
 
-ごうさんへ
+${ownerName}さんへ
 この要件定義でよろしいですか？承認いただければ設計・実装フェーズに進みます。`,
       },
     ],
@@ -445,6 +447,7 @@ export async function generateInitialInterview(
   targetLabel: string,
   projectType: string,
   onOutput: (agentType: string, text: string) => void,
+  ownerName: string = "ごう",
 ): Promise<string> {
   console.log(
     `[ORCHESTRATOR] 受信 generateInitialInterview targetLabel=${targetLabel} projectType=${projectType} reqLen=${userRequest.length}`,
@@ -504,7 +507,7 @@ export async function generateInitialInterview(
       {
         role: "system",
         content: `SPM開発エージェントのOrchestratorです。
-3エージェントの意見を整理してごうさんへの初期確認事項をまとめてください。
+3エージェントの意見を整理して${ownerName}さんへの初期確認事項をまとめてください。
 
 冒頭に「全体像を把握するため確認させてください。」と書く。
 
@@ -517,7 +520,7 @@ C 選択肢C（最後の選択肢には「未定・その他」を含める）
 
 選択肢は必ず3つ以上。自由記述のみの質問は禁止。
 質問の重複を排除。最大5問。
-ごうさんが素早く答えられるように選択肢を具体的にすること。`,
+${ownerName}さんが素早く答えられるように選択肢を具体的にすること。`,
       },
       {
         role: "user",

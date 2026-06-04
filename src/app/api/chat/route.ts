@@ -138,6 +138,15 @@ export async function POST(request: Request) {
       }
     }
 
+    // B1：協議の宛先名。owner があればその名前、無ければ "ごう" にフォールバック。
+    const ownerName =
+      (session.project.ownerId
+        ? (await prisma.user.findUnique({
+            where: { id: session.project.ownerId },
+            select: { name: true },
+          }))?.name?.trim()
+        : null) || "ごう";
+
     const emitText = (agentType: string, text: string) => {
       const key = agentTypeToSseKey(agentType);
       if (!text) {
@@ -349,6 +358,7 @@ export async function POST(request: Request) {
         targetLabel,
         session.project.projectType,
         emitText,
+        ownerName,
       );
 
       await prisma.message.create({
@@ -440,7 +450,7 @@ export async function POST(request: Request) {
         });
         send({ type: "agent_start", data: { agentType: "orchestrator", label: "要件定義書作成" } });
 
-        const requirementsDoc = await createRequirementsDoc(baseContext, history, emitText);
+        const requirementsDoc = await createRequirementsDoc(baseContext, history, emitText, ownerName);
 
         // 充足チェック（Phase A）：ユーザー提供の具体制約（部屋/面積/機器/動線/コスト等）が
         // 要件定義書に反映されているか照合。未反映は (1) 逐語で自動転記（決定論・創作しない）。
@@ -702,7 +712,7 @@ export async function POST(request: Request) {
       );
       send({ type: "agent_complete", data: { agentType: "debate" } });
 
-      const judgment = await orchestratorJudge(baseContext, currentHistory, domains, currentRound);
+      const judgment = await orchestratorJudge(baseContext, currentHistory, domains, currentRound, ownerName);
       console.log("[DEBATE] judgment:", JSON.stringify(judgment), "round:", currentRound);
 
       // 安全網: ラウンド上限に達したら ask_user でも finalize に倒す（同じ質問のループ防止）。
