@@ -1,5 +1,6 @@
 import { anthropic, MODEL, hasApiKey } from "@/lib/anthropic";
 import { loadSpmContext } from "@/lib/obsidian";
+import { PLATFORM_FACTS } from "@/lib/platform-facts";
 import type { ClaudeMessage } from "@/types";
 
 const BREVITY_RULE = `【出力の簡潔化】
@@ -77,9 +78,10 @@ export async function streamPmAgent(
     return { fullText: stub, containsPlanDoc: detectPlanDoc(stub) };
   }
 
+  // 実プラットフォーム事実は includeContext に関わらず必ず注入（接地＝Vault 非依存）。
   const system = includeContext
-    ? [PM_SYSTEM_PROMPT, "", "## 参照コンテキスト", (await loadSpmContext()).combined].join("\n")
-    : PM_SYSTEM_PROMPT;
+    ? [PM_SYSTEM_PROMPT, "", PLATFORM_FACTS, "", "## 参照コンテキスト", (await loadSpmContext()).combined].join("\n")
+    : [PM_SYSTEM_PROMPT, "", PLATFORM_FACTS].join("\n");
 
   const userMessage = [
     "以下の要件定義書をもとに、設計・開発計画書を作成してください。",

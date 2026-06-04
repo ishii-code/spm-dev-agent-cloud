@@ -5,6 +5,7 @@ import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
 import { waitForSlackApproval, waitForSlackChoice } from "./slack-approval";
+import { withPlatformFacts } from "./platform-facts";
 
 // =============================================================================
 // 実行環境の解決（macOS / Linux 両対応）
@@ -125,7 +126,8 @@ export async function runClaudeCode(
   void projectId;
 
   const tmpFile = path.join(os.tmpdir(), `claude-prompt-${Date.now()}.txt`);
-  await fs.writeFile(tmpFile, prompt, "utf-8");
+  // 実プラットフォーム事実を前置して接地（Supabase/Vercel 幻覚・誤統一主張の防止）。
+  await fs.writeFile(tmpFile, withPlatformFacts(prompt), "utf-8");
 
   try {
     const pty = await import("node-pty");
@@ -360,7 +362,8 @@ export async function startClaudeCodeDetached(
   const doneFile = path.join(tmp, `claude-done-${id}`);
   const logFile = path.join(tmp, `claude-log-${id}`);
 
-  await fs.writeFile(promptFile, prompt, "utf-8");
+  // 実プラットフォーム事実を前置して接地（Supabase/Vercel 幻覚・誤統一主張の防止）。
+  await fs.writeFile(promptFile, withPlatformFacts(prompt), "utf-8");
 
   const { spawn } = await import("child_process");
 

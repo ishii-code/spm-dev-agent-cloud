@@ -107,14 +107,14 @@ export interface SpmContext {
 }
 
 async function readVaultFile(relativePath: string): Promise<string> {
+  // VAULT_PATH 未設定 or 読み込み失敗時は「[読み込み失敗]」をモデル context に注入しない。
+  // 接地は platform-facts.ts（コード同梱）が担保するため、欠損は空文字で無害化する。
+  if (!VAULT_PATH) return "";
   const absolute = path.join(VAULT_PATH, relativePath);
   try {
     return await fs.readFile(absolute, "utf-8");
-  } catch (error) {
-    if (error instanceof Error) {
-      return `[読み込み失敗: ${relativePath} — ${error.message}]`;
-    }
-    return `[読み込み失敗: ${relativePath}]`;
+  } catch {
+    return "";
   }
 }
 
