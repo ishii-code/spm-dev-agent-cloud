@@ -3,7 +3,7 @@ import path from "path";
 import { prisma } from "./prisma";
 import { projectsRoot } from "./repos";
 import { parseAskHuman } from "./ask-human";
-import { pickMentionId } from "./slack-mention";
+import { pickMentionId, pickHitlAnswer } from "./slack-mention";
 import {
   startClaudeCodeDetached,
   checkClaudeCode,
@@ -14,7 +14,7 @@ import {
   openDmChannel,
   slackConfigured,
   approvalChannel,
-  readLatestUserReply,
+  readUserReplies,
 } from "./slack-notifier";
 import { scaffoldNextApp } from "./scaffold";
 import { spawn } from "node:child_process";
@@ -939,7 +939,8 @@ async function advanceWaiting(
     `🔧 *${noteHead(note)}*${repoLine(note)}\n\n` +
     `内容: ${next.content.slice(0, 200)}${next.content.length > 200 ? "..." : ""}\n\n` +
     `✅ または 👍 で承認 / ❌ でスキップ（リアクションが付くまで待機します）`;
-  const approvalTs = await postSlackTo(slack.channel, approvalText, slack.threadTs, slack.mentionId);
+  // 承認依頼も新規ルートメッセージで投稿（reactions は threading 非依存だが、両方を root に統一）。
+  const approvalTs = await postSlackTo(slack.channel, approvalText, undefined, slack.mentionId);
   if (!approvalTs) {
     console.error(
       `[TICK] Part${next.partNumber} 承認メッセージ送信失敗。次tickで再試行`,
@@ -1003,7 +1004,10 @@ async function advanceWaitingForHuman(
       `🤔 *${noteHead(note, "確認(HITL)")}*${repoLine(note)}\n` +
       `${next.humanQuestion ?? "(質問本文なし)"}${choiceLines}\n` +
       `はい/いいえは ✅ / ❌ リアクションでも可`;
-    const ts = await postSlackTo(channel, text, slack.threadTs, slack.mentionId);
+    // 質問は「新規ルートメッセージ」で投稿（threadTs を渡さない）。これにより質問 ts が真の
+    // スレッド親になり、回答(返信)を conversations.replies(質問ts) で確実に拾える。
+    // プロジェクトスレッドにぶら下げると返信がルートに付き、並列 HITL で質問別に判別できない。
+    const ts = await postSlackTo(channel, text, undefined, slack.mentionId);
     if (!ts) {
       await prisma.document.update({ where: { id: next.id }, data: { humanAskedAt: null } });
       return { status: "no_op", reason: "hitl_post_failed" };
@@ -1017,16 +1021,15 @@ async function advanceWaitingForHuman(
   const ts = next.humanQuestionTs;
   if (!ts) return { status: "no_op", reason: "hitl_no_ts" };
   const ch = channel ?? approvalChannel();
+  // 受理対象＝owner.slackId(=slack.mentionId で解決済) ∪ 固定 ID。owner 未設定なら固定のみ（後方互換・anti-spoof）。
+  const FIXED_ID = process.env.SLACK_MENTION_USER_ID ?? process.env.ASK_USER_ID ?? "U0AMRAQDW65";
+  const acceptIds = Array.from(new Set([slack?.mentionId, FIXED_ID].filter(Boolean) as string[]));
+  const choices = Array.isArray(next.humanChoices) ? (next.humanChoices as string[]) : [];
   let answer: string | null = null;
-  const reply = await readLatestUserReply(ts, ch);
-  if (reply) {
-    const choices = Array.isArray(next.humanChoices) ? (next.humanChoices as string[]) : [];
-    const num = Number.parseInt(reply.trim(), 10);
-    answer =
-      choices.length && !Number.isNaN(num) && num >= 1 && num <= choices.length
-        ? choices[num - 1]
-        : reply.trim();
-  } else {
+  const replies = await readUserReplies(ts, ch, acceptIds);
+  // 番号選択式は有効番号を優先（meta テキストは回答にしない）、自由記述は最新返信。
+  answer = pickHitlAnswer(replies, choices);
+  if (!answer) {
     const r = await checkReactionOnce(ts, ch);
     if (r === "approved") answer = "はい";
     else if (r === "rejected") answer = "いいえ";
