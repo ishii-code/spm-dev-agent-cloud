@@ -55,8 +55,9 @@ export async function postSlackTo(
   channel: string,
   text: string,
   threadTs?: string,
+  mentionId?: string | null,
 ): Promise<string> {
-  const ts = await postMessage(text, threadTs, channel);
+  const ts = await postMessage(text, threadTs, channel, mentionId);
   return ts ?? "";
 }
 const REMINDER_INTERVAL_MS = 3_600_000;
@@ -73,6 +74,7 @@ async function postMessage(
   text: string,
   threadTs?: string,
   channel: string = SLACK_CHANNEL,
+  mentionId?: string | null,
 ): Promise<string | undefined> {
   if (!SLACK_TOKEN) return undefined;
   try {
@@ -84,7 +86,7 @@ async function postMessage(
       },
       body: JSON.stringify({
         channel,
-        text: withMention(text),
+        text: withMention(text, mentionId),
         thread_ts: threadTs,
       }),
     });

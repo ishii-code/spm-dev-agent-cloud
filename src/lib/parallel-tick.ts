@@ -3,6 +3,7 @@ import path from "path";
 import { prisma } from "./prisma";
 import { projectsRoot } from "./repos";
 import { parseAskHuman } from "./ask-human";
+import { pickMentionId } from "./slack-mention";
 import {
   startClaudeCodeDetached,
   checkClaudeCode,
@@ -35,23 +36,46 @@ export function isExecHost(): boolean {
 export interface SlackTarget {
   channel: string;
   threadTs?: string;
+  // メンション対象 ID（owner.slackId → creatorSlackId → 固定）。undefined なら withMention が固定にフォールバック。
+  mentionId?: string;
+}
+
+// owner(User) の slackId を引く。ownerId 未設定/未登録は null。
+async function ownerSlackId(ownerId: number | null | undefined): Promise<string | null> {
+  if (ownerId == null) return null;
+  const u = await prisma.user
+    .findUnique({ where: { id: ownerId }, select: { slackId: true } })
+    .catch(() => null);
+  return u?.slackId ?? null;
+}
+
+// メンション対象 ID をチェーン解決：owner.slackId → creatorSlackId → undefined（固定へフォールバック）。
+export async function mentionFor(project: {
+  ownerId: number | null;
+  creatorSlackId: string | null;
+}): Promise<string | undefined> {
+  return pickMentionId(await ownerSlackId(project.ownerId), project.creatorSlackId);
 }
 
 async function resolveSlackTarget(project: {
   slackThreadTs: string | null;
   creatorSlackId: string | null;
+  ownerId: number | null;
 }): Promise<SlackTarget | null> {
   if (!slackConfigured()) return null;
-  if (project.creatorSlackId) {
-    const dm = await openDmChannel(project.creatorSlackId);
-    if (dm) return { channel: dm };
-    console.warn(
-      `[TICK] DM open 失敗 → 共有チャンネルにフォールバック (creatorSlackId=${project.creatorSlackId})`,
-    );
+  const oid = await ownerSlackId(project.ownerId);
+  const mentionId = pickMentionId(oid, project.creatorSlackId);
+  // DM 宛先も owner.slackId を優先（無ければ creatorSlackId）。現 creatorSlackId 動作は保持。
+  const dmId = oid ?? project.creatorSlackId;
+  if (dmId) {
+    const dm = await openDmChannel(dmId);
+    if (dm) return { channel: dm, mentionId };
+    console.warn(`[TICK] DM open 失敗 → 共有チャンネルにフォールバック (dmId=${dmId})`);
   }
   return {
     channel: approvalChannel(),
     threadTs: project.slackThreadTs ?? undefined,
+    mentionId,
   };
 }
 
@@ -63,7 +87,7 @@ function skipApprovalEnabled(): boolean {
 // SlackTarget 経由でメッセージ投稿（失敗は握りつぶす）。target が null なら何もしない。
 async function notifySlack(target: SlackTarget | null, text: string): Promise<string> {
   if (!target) return "";
-  return postSlackTo(target.channel, text, target.threadTs).catch(() => "");
+  return postSlackTo(target.channel, text, target.threadTs, target.mentionId).catch(() => "");
 }
 
 const EXEC_TIMEOUT_MS = 3 * 60 * 60 * 1000; // 3 時間
@@ -711,6 +735,7 @@ async function processOneTickInner(
         title: true,
         slackThreadTs: true,
         creatorSlackId: true,
+        ownerId: true,
         parallelStatus: true,
         parallelWorkingDir: true,
         targetSystem: true,
@@ -914,7 +939,7 @@ async function advanceWaiting(
     `🔧 *${noteHead(note)}*${repoLine(note)}\n\n` +
     `内容: ${next.content.slice(0, 200)}${next.content.length > 200 ? "..." : ""}\n\n` +
     `✅ または 👍 で承認 / ❌ でスキップ（リアクションが付くまで待機します）`;
-  const approvalTs = await postSlackTo(slack.channel, approvalText, slack.threadTs);
+  const approvalTs = await postSlackTo(slack.channel, approvalText, slack.threadTs, slack.mentionId);
   if (!approvalTs) {
     console.error(
       `[TICK] Part${next.partNumber} 承認メッセージ送信失敗。次tickで再試行`,
@@ -978,7 +1003,7 @@ async function advanceWaitingForHuman(
       `🤔 *${noteHead(note, "確認(HITL)")}*${repoLine(note)}\n` +
       `${next.humanQuestion ?? "(質問本文なし)"}${choiceLines}\n` +
       `はい/いいえは ✅ / ❌ リアクションでも可`;
-    const ts = await postSlackTo(channel, text, slack.threadTs);
+    const ts = await postSlackTo(channel, text, slack.threadTs, slack.mentionId);
     if (!ts) {
       await prisma.document.update({ where: { id: next.id }, data: { humanAskedAt: null } });
       return { status: "no_op", reason: "hitl_post_failed" };
@@ -1072,7 +1097,7 @@ async function advanceWaitingForHuman(
         data: { humanRenotifiedAt: new Date() },
       });
       if (c.count > 0) {
-        await postSlackTo(ch, `🔔 未回答の確認があります（${noteHead(note)}）。スレッド返信で再開します。`, ts).catch(() => {});
+        await postSlackTo(ch, `🔔 未回答の確認があります（${noteHead(note)}）。スレッド返信で再開します。`, ts, slack?.mentionId).catch(() => {});
       }
     }
     return { status: "no_op", reason: "hitl_blocked_waiting" };
