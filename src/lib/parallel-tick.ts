@@ -12,6 +12,14 @@ import {
   parseVerifyVerdict,
 } from "./verify";
 import {
+  deployPreview,
+  teardownPreview,
+  readPreviewUrl,
+  readPreviewLog,
+  buildRevisePrompt,
+} from "./preview-deploy";
+import { formatJst } from "./time";
+import {
   startClaudeCodeDetached,
   checkClaudeCode,
 } from "./claude-code-runner";
@@ -95,6 +103,12 @@ function skipApprovalEnabled(): boolean {
 // "1" / "true" で ON（VM のみ。Cloud Run は isExecHost()=false で verifying に入らない）。
 function verifyBeforeDoneEnabled(): boolean {
   return process.env.VERIFY_BEFORE_DONE === "1" || process.env.VERIFY_BEFORE_DONE === "true";
+}
+
+// プレビュー QA ループ（Phase E 2.2）。OFF（既定）＝検証OK後そのまま done＝挙動不変。
+// "1"/"true" で ON（VM のみ）。検証通過後に deploying→awaiting_qa（✅/コメント）を挟む。
+function previewQaEnabled(): boolean {
+  return process.env.PREVIEW_QA === "1" || process.env.PREVIEW_QA === "true";
 }
 
 // SlackTarget 経由でメッセージ投稿（失敗は握りつぶす）。target が null なら何もしない。
@@ -214,7 +228,11 @@ export type TickAdvancedReason =
   | "verifying"
   | "verify_progress"
   | "needs_review"
-  | "verified_done";
+  | "verified_done"
+  | "deploying"
+  | "awaiting_qa"
+  | "preview_progress"
+  | "preview_done";
 
 export type TickResult =
   | { status: "busy" }
@@ -777,6 +795,10 @@ async function processOneTickInner(
   if (project.parallelStatus === "verifying" || project.parallelStatus === "needs_review") {
     return await advanceVerification(project, slack);
   }
+  // プレビュー QA（Phase E 2.2）：deploying（デプロイ中）/ awaiting_qa（レビュー待ち）は専用 advance。VM 限定。
+  if (project.parallelStatus === "deploying" || project.parallelStatus === "awaiting_qa") {
+    return await advancePreviewQa(project, slack);
+  }
   if (project.parallelStatus !== "running") {
     return { status: "no_op", reason: "not_running" };
   }
@@ -1272,6 +1294,18 @@ async function finalizeVerifiedDone(
 ): Promise<TickResult> {
   await prisma.document.update({ where: { id: sentinelId }, data: { executionStatus: "passed" } }).catch(() => {});
   await notifySlack(slack, `✅ *【${project.title}】検証OK*（変更/ボイラープレート/ビルド/批評すべて通過）`).catch(() => {});
+  // プレビュー QA（Phase E 2.2）ON かつ VM のときは、done の前に deploying を挟む。
+  // OFF（既定）/Cloud Run は従来どおり即 done＝挙動不変。
+  if (previewQaEnabled() && isExecHost()) {
+    const claimed = await prisma.project.updateMany({
+      where: { id: project.id, parallelStatus: "verifying" },
+      data: { parallelStatus: "deploying" },
+    });
+    if (claimed.count > 0) {
+      console.log(`[TICK] project=${project.id} verify OK → deploying（プレビューQA）`);
+      return { status: "advanced", reason: "deploying" };
+    }
+  }
   await markProjectDone(project.id, project.title, slack);
   console.log(`[TICK] project=${project.id} verify → done`);
   return { status: "advanced", reason: "verified_done" };
@@ -1326,6 +1360,166 @@ async function finalizeOverrideDone(
   await markProjectDone(project.id, project.title, slack);
   console.log(`[TICK] project=${project.id} needs_review → override done (${how})`);
   return { status: "advanced", reason: "verified_done" };
+}
+
+// ===========================================================================
+// プレビュー QA ループ（Phase E 2.2）：deploying（2段buildpacksデプロイ）/ awaiting_qa
+// （URL レビュー待ち）。VM 限定。sentinel Document(type:"preview") に状態を保持：
+//   content: JSON {name,urlFile,logFile,url}（name は同URL再デプロイ用に維持）
+//   executionStatus: pending/redeploy → deploy_running → awaiting_qa →(revise_running)→ done
+//   execPid/execDoneFile: deploy or revise の detached 実行（inspectExec 判定）
+//   humanQuestion: URL / humanQuestionTs: 🔎 通知 ts（✅/コメント読み取り用）
+// ✅/「完了」→ teardown＋done。コメント → revise(claude) → 同名 redeploy → 再通知。
+// ===========================================================================
+function parsePreviewMeta(content: string | null): { name?: string; urlFile?: string; logFile?: string; url?: string } {
+  try {
+    return JSON.parse(content || "{}");
+  } catch {
+    return {};
+  }
+}
+
+async function advancePreviewQa(
+  project: VerifyProject,
+  slack: SlackTarget | null,
+): Promise<TickResult> {
+  if (!isExecHost()) return { status: "no_op", reason: "exec_host_only" };
+  const projectId = project.id;
+  const cwd = project.parallelWorkingDir;
+  const sentinel = await prisma.document.findFirst({
+    where: { projectId, type: "preview" },
+    orderBy: { createdAt: "desc" },
+  });
+  const meta = parsePreviewMeta(sentinel?.content ?? null);
+  const st = sentinel?.executionStatus ?? "pending";
+
+  // ----- deploying -----
+  if (project.parallelStatus === "deploying") {
+    if (!cwd) return await finalizeNeedsReview(project, slack, sentinel?.id ?? null, ["作業ディレクトリ未設定でプレビュー不可"]);
+
+    if (st === "pending" || st === "redeploy" || !sentinel) {
+      const accCwd = await ensureAccessibleCwd(cwd).catch(() => null);
+      if (!accCwd) return await finalizeNeedsReview(project, slack, sentinel?.id ?? null, ["preview 用 cwd アクセス不可"]);
+      let spawned;
+      try {
+        spawned = await deployPreview(projectId, accCwd, meta.name ? { name: meta.name } : {});
+      } catch (e) {
+        return await finalizeNeedsReview(project, slack, sentinel?.id ?? null, [`プレビュー deploy 起動失敗: ${e instanceof Error ? e.message : String(e)}`]);
+      }
+      const content = JSON.stringify({ name: spawned.name, urlFile: spawned.urlFile, logFile: spawned.logFile });
+      if (sentinel) {
+        await prisma.document.update({
+          where: { id: sentinel.id },
+          data: { executionStatus: "deploy_running", execPid: spawned.pid, execDoneFile: spawned.doneFile, content },
+        });
+      } else {
+        await prisma.document.create({
+          data: { projectId, type: "preview", title: "プレビュー", content, executionStatus: "deploy_running", execPid: spawned.pid, execDoneFile: spawned.doneFile },
+        });
+      }
+      console.log(`[TICK] project=${projectId} preview deploy 起動 name=${spawned.name}`);
+      return { status: "advanced", reason: "preview_progress" };
+    }
+
+    if (st === "deploy_running") {
+      const inspect = await inspectExec(sentinel?.execDoneFile ?? "", sentinel?.execPid ?? null);
+      if (inspect.status === "running") return { status: "no_op", reason: "preview_deploy_running" };
+      if (inspect.status === "failed") {
+        return await finalizeNeedsReview(project, slack, sentinel?.id ?? null, ["プレビューのデプロイ失敗", (meta.logFile ? readPreviewLog(meta.logFile) : "").slice(-800)]);
+      }
+      const url = meta.urlFile ? readPreviewUrl(meta.urlFile) : null;
+      if (!url) {
+        return await finalizeNeedsReview(project, slack, sentinel?.id ?? null, ["プレビュー URL を取得できませんでした", (meta.logFile ? readPreviewLog(meta.logFile) : "").slice(-800)]);
+      }
+      const ts = await notifySlack(
+        slack,
+        `🔎 *【${project.title}】プレビュー準備完了*\nURL: ${url}\n（確認後：✅ または「完了」で確定 / コメントで修正指示→同URLで再デプロイ）\n${formatJst()}`,
+      ).catch(() => "");
+      await prisma.document.update({
+        where: { id: sentinel!.id },
+        data: {
+          executionStatus: "awaiting_qa",
+          content: JSON.stringify({ ...meta, url }),
+          humanQuestion: url,
+          humanQuestionTs: ts || null,
+          humanAskedAt: new Date(),
+          execPid: null,
+          execDoneFile: null,
+        },
+      });
+      await prisma.project.updateMany({ where: { id: projectId, parallelStatus: "deploying" }, data: { parallelStatus: "awaiting_qa" } });
+      console.log(`[TICK] project=${projectId} preview deploy OK → awaiting_qa url=${url}`);
+      return { status: "advanced", reason: "awaiting_qa" };
+    }
+    return { status: "no_op", reason: "preview_deploy_unknown" };
+  }
+
+  // ----- awaiting_qa -----
+  if (!sentinel) return { status: "no_op", reason: "preview_no_sentinel" };
+  const ch = slack?.channel ?? approvalChannel();
+  const ts = sentinel.humanQuestionTs;
+
+  // revise 実行中：完了で同名 redeploy、失敗で needs_review。
+  if (st === "revise_running") {
+    const inspect = await inspectExec(sentinel.execDoneFile ?? "", sentinel.execPid ?? null);
+    if (inspect.status === "running") return { status: "no_op", reason: "preview_revise_running" };
+    if (inspect.status === "failed") {
+      return await finalizeNeedsReview(project, slack, sentinel.id, ["プレビュー修正(revise)に失敗", (inspect.log || "").slice(-800)]);
+    }
+    await prisma.document.update({ where: { id: sentinel.id }, data: { executionStatus: "redeploy", execPid: null, execDoneFile: null } });
+    await prisma.project.updateMany({ where: { id: projectId, parallelStatus: "awaiting_qa" }, data: { parallelStatus: "deploying" } });
+    await notifySlack(slack, `🔁 *【${project.title}】修正を反映 → 同URLで再デプロイします*`).catch(() => {});
+    console.log(`[TICK] project=${projectId} preview revise OK → redeploy`);
+    return { status: "advanced", reason: "deploying" };
+  }
+
+  // awaiting_qa：✅/完了 → done、コメント → revise。
+  if (ts) {
+    const replies = await readUserReplies(ts, ch);
+    const approve =
+      replies.some((r) => /(^|\s)(完了|承認|approve|done|ok|✅)(\s|$)/i.test(r)) ||
+      (await checkReactionOnce(ts, ch)) === "approved";
+    if (approve) {
+      return await finalizePreviewDone(project, slack, sentinel.id, meta.name);
+    }
+    // 承認以外の非空返信＝修正コメント（最新を採用）。
+    const comment = [...replies].reverse().find((r) => r.trim().length >= 2 && !/(^|\s)(完了|承認|approve|done|ok)(\s|$)/i.test(r));
+    if (comment && cwd) {
+      const accCwd = await ensureAccessibleCwd(cwd).catch(() => null);
+      if (!accCwd) return { status: "no_op", reason: "preview_cwd_unavailable" };
+      let spawned;
+      try {
+        spawned = await startClaudeCodeDetached(buildRevisePrompt(comment), accCwd, "プレビュー修正", projectId);
+      } catch (e) {
+        return await finalizeNeedsReview(project, slack, sentinel.id, [`revise 起動失敗: ${e instanceof Error ? e.message : String(e)}`]);
+      }
+      await prisma.document.update({
+        where: { id: sentinel.id },
+        data: { executionStatus: "revise_running", execPid: spawned.pid, execDoneFile: spawned.doneFile, humanAnswer: comment.slice(0, 200) },
+      });
+      await notifySlack(slack, `🛠 *【${project.title}】修正指示を反映中...*\n指摘: ${comment.slice(0, 120)}`).catch(() => {});
+      console.log(`[TICK] project=${projectId} awaiting_qa → revise 起動`);
+      return { status: "advanced", reason: "preview_progress" };
+    }
+  }
+  return { status: "no_op", reason: "awaiting_qa_waiting" };
+}
+
+// プレビュー承認 → 確定。teardown（best-effort）＋ markProjectDone。
+async function finalizePreviewDone(
+  project: VerifyProject,
+  slack: SlackTarget | null,
+  sentinelId: string,
+  name: string | undefined,
+): Promise<TickResult> {
+  if (name) {
+    await teardownPreview(name).catch(() => {});
+  }
+  await prisma.document.update({ where: { id: sentinelId }, data: { executionStatus: "done" } }).catch(() => {});
+  await notifySlack(slack, `✅ *【${project.title}】プレビュー承認 → 確定*（プレビューは teardown 済み）`).catch(() => {});
+  await markProjectDone(project.id, project.title, slack);
+  console.log(`[TICK] project=${project.id} awaiting_qa → preview done (teardown ${name ?? "-"})`);
+  return { status: "advanced", reason: "preview_done" };
 }
 
 // B) awaiting_approval → リアクションを 1 回だけ確認

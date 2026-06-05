@@ -7,8 +7,12 @@ import {
   previewImage,
   buildSubmitArgs,
   runDeployArgs,
+  iapEnableArgs,
+  iapInvokerArgs,
+  iapBindArgs,
   teardownArgs,
   isValidPreviewName,
+  buildRevisePrompt,
 } from "../src/lib/preview-deploy";
 
 let passed = 0;
@@ -52,6 +56,9 @@ t("builds submit --pack + impersonate + 専用repo image", () => {
   assert.ok(a.some((x) => x.startsWith("image=asia-northeast1-docker.pkg.dev/vets-biz-aigen-apps/spm-preview/")));
   assert.ok(a.includes("--impersonate-service-account=preview-deployer@vets-biz-aigen-apps.iam.gserviceaccount.com"));
   assert.ok(a.includes("--project=vets-biz-aigen-apps"));
+  assert.ok(a.includes("--suppress-logs"));
+  assert.ok(a.includes("--default-buckets-behavior=REGIONAL_USER_OWNED_BUCKET"));
+  assert.ok(a.includes("--service-account=projects/vets-biz-aigen-apps/serviceAccounts/preview-deployer@vets-biz-aigen-apps.iam.gserviceaccount.com"));
   assert.ok(a.includes("--quiet"));
 });
 
@@ -62,11 +69,36 @@ t("run deploy --image + impersonate + scale-to-zero + labels(ttl) + url format",
   assert.ok(a.includes("--image=IMG"));
   assert.ok(a.includes("--region=asia-northeast1"));
   assert.ok(a.includes("--impersonate-service-account=preview-deployer@vets-biz-aigen-apps.iam.gserviceaccount.com"));
-  assert.ok(a.includes("--allow-unauthenticated"));
+  assert.ok(a.includes("--no-allow-unauthenticated")); // 公開しない（IAPで制御）
+  assert.ok(!a.includes("--allow-unauthenticated") || a.includes("--no-allow-unauthenticated"));
   assert.ok(a.includes("--min-instances=0"));
   assert.ok(a.includes("--max-instances=1"));
   assert.ok(a.includes("--labels=spm-preview=true,spm-project=cmpz1234,spm-ttl=1780000000"));
   assert.ok(a.includes("--format=value(status.url)"));
+});
+
+console.log("iapEnableArgs / iapBindArgs");
+t("IAP 有効化 args（run services update --iap・impersonate）", () => {
+  const a = iapEnableArgs("preview-cmpz1234-abcdef");
+  assert.deepEqual(a.slice(0, 4), ["run", "services", "update", "preview-cmpz1234-abcdef"]);
+  assert.ok(a.includes("--iap"));
+  assert.ok(a.includes("--region=asia-northeast1"));
+  assert.ok(a.includes("--impersonate-service-account=preview-deployer@vets-biz-aigen-apps.iam.gserviceaccount.com"));
+});
+t("IAP domain 限定アクセス args（cloud-run・domain:peco-japan.com）", () => {
+  const a = iapBindArgs("preview-cmpz1234-abcdef");
+  assert.deepEqual(a.slice(0, 3), ["iap", "web", "add-iam-policy-binding"]);
+  assert.ok(a.includes("--resource-type=cloud-run"));
+  assert.ok(a.includes("--service=preview-cmpz1234-abcdef"));
+  assert.ok(a.includes("--member=domain:peco-japan.com"));
+  assert.ok(a.includes("--role=roles/iap.httpsResourceAccessor"));
+});
+
+t("IAP SA invoker 付与 args（対象サービス限定・run.invoker）", () => {
+  const a = iapInvokerArgs("preview-cmpz1234-abcdef");
+  assert.deepEqual(a.slice(0, 4), ["run", "services", "add-iam-policy-binding", "preview-cmpz1234-abcdef"]);
+  assert.ok(a.includes("--member=serviceAccount:service-842623777962@gcp-sa-iap.iam.gserviceaccount.com"));
+  assert.ok(a.includes("--role=roles/run.invoker"));
 });
 
 console.log("teardownArgs");
@@ -86,6 +118,15 @@ t("正/不正の判定", () => {
   assert.ok(!isValidPreviewName("preview-x-AB!"));        // 記号
   assert.ok(!isValidPreviewName("svc-cmpz1234-abcdef"));  // 接頭辞違い
   assert.ok(!isValidPreviewName("preview-cmpz1234-abc"));  // rand 6字未満
+});
+
+console.log("buildRevisePrompt");
+t("コメントを含む revise プロンプト（仕様外追加禁止・ビルド通過の指示込み）", () => {
+  const p = buildRevisePrompt("ボタンの色を青に、受付は追加しないで");
+  assert.match(p, /ボタンの色を青に、受付は追加しないで/);
+  assert.match(p, /修正/);
+  assert.match(p, /仕様にない要素は追加しない/);
+  assert.match(p, /ビルドが通る/);
 });
 
 console.log(`\n✅ all ${passed} tests passed`);

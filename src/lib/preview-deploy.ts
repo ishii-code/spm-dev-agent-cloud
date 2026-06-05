@@ -14,6 +14,11 @@ const REGION = process.env.GCP_REGION || "asia-northeast1";
 const DEPLOYER =
   process.env.PREVIEW_DEPLOYER_SA || `preview-deployer@${PROJECT}.iam.gserviceaccount.com`;
 const AR_REPO = "spm-preview";
+// プレビューのアクセス許可ドメイン（直結 IAP）。
+const IAP_DOMAIN = process.env.PREVIEW_IAP_DOMAIN || "peco-japan.com";
+// IAP サービスエージェント（IAP→Cloud Run 呼び出し主体）。
+const PROJECT_NUMBER = process.env.GCP_PROJECT_NUMBER || "842623777962";
+const IAP_SA = `service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com`;
 const DEFAULT_TTL_SECONDS = Number(process.env.PREVIEW_TTL_SECONDS || 24 * 3600);
 const DEPLOY_TIMEOUT_SECONDS = Number(process.env.PREVIEW_DEPLOY_TIMEOUT_SECONDS || 1200); // 20分
 const MAX_LOG_BYTES = 200_000;
@@ -61,7 +66,13 @@ export function buildSubmitArgs(cwd: string, image: string): string[] {
     "builds", "submit", cwd,
     "--pack", `image=${image}`,
     `--impersonate-service-account=${DEPLOYER}`,
+    // ビルド実行 SA も deployer に固定（既定の compute SA を実行系から外す＝触らない）。
+    `--service-account=projects/${PROJECT}/serviceAccounts/${DEPLOYER}`,
     `--project=${PROJECT}`,
+    // user-specified SA は default logs bucket を使えないため、SA 所有のリージョナルバケットに
+    // source/logs を置く（必須）。さらに client 側 stream も抑止。
+    "--default-buckets-behavior=REGIONAL_USER_OWNED_BUCKET",
+    "--suppress-logs",
     "--quiet",
   ];
 }
@@ -74,7 +85,8 @@ export function runDeployArgs(name: string, image: string, projectId: string, tt
     `--region=${REGION}`,
     `--project=${PROJECT}`,
     `--impersonate-service-account=${DEPLOYER}`,
-    "--allow-unauthenticated",
+    // 公開しない。アクセス制御は直結 IAP（domain:peco-japan.com）で行う。
+    "--no-allow-unauthenticated",
     "--min-instances=0",
     "--max-instances=1",
     `--labels=spm-preview=true,spm-project=${projectId},spm-ttl=${ttlEpoch}`,
@@ -91,9 +103,60 @@ export function teardownArgs(name: string): { serviceDelete: string[]; imageDele
   };
 }
 
+// IAP 有効化の引数列（純粋）。デプロイ後に Cloud Run 直結 IAP を ON にする。
+export function iapEnableArgs(name: string): string[] {
+  return [
+    "run", "services", "update", name,
+    "--iap",
+    `--region=${REGION}`,
+    `--project=${PROJECT}`,
+    `--impersonate-service-account=${DEPLOYER}`,
+    "--quiet",
+  ];
+}
+
+// IAP→Cloud Run 呼び出しのため IAP サービスエージェントに run.invoker を付与（対象サービス限定）。
+export function iapInvokerArgs(name: string): string[] {
+  return [
+    "run", "services", "add-iam-policy-binding", name,
+    `--region=${REGION}`,
+    `--project=${PROJECT}`,
+    `--member=serviceAccount:${IAP_SA}`,
+    "--role=roles/run.invoker",
+    `--impersonate-service-account=${DEPLOYER}`,
+    "--quiet",
+  ];
+}
+
+// IAP アクセス権（domain 限定）付与の引数列（純粋）。
+export function iapBindArgs(name: string): string[] {
+  return [
+    "iap", "web", "add-iam-policy-binding",
+    "--resource-type=cloud-run",
+    `--service=${name}`,
+    `--region=${REGION}`,
+    `--project=${PROJECT}`,
+    `--member=domain:${IAP_DOMAIN}`,
+    "--role=roles/iap.httpsResourceAccessor",
+    `--impersonate-service-account=${DEPLOYER}`,
+    "--quiet",
+  ];
+}
+
 // 名前の検証（純粋）。
 export function isValidPreviewName(name: string): boolean {
   return /^preview-[a-z0-9]{2,}-[a-z0-9]{6}$/.test(name) && name.length <= 63;
+}
+
+// QA コメント → 実装 revise プロンプト（純粋）。プレビューへのフィードバックを既存実装に反映させる。
+export function buildRevisePrompt(comment: string): string {
+  return (
+    `# プレビューレビューの反映（修正パス）\n` +
+    `デプロイ済みプレビューに対して、レビュー担当から次のフィードバックがありました。\n` +
+    `この内容を**既存の実装（このディレクトリ）に対する修正**として反映してください。\n` +
+    `要件・設計の範囲内で対応し、仕様にない要素は追加しないこと。完了後はビルドが通る状態にすること。\n\n` +
+    `## フィードバック\n${(comment || "(指摘内容なし)").slice(0, 4000)}\n`
+  );
 }
 
 // ---- 副作用（VM 限定の spawn） --------------------------------------------
@@ -103,10 +166,11 @@ export function isValidPreviewName(name: string): boolean {
 export async function deployPreview(
   projectId: string,
   cwd: string,
-  opts: { ttlSeconds?: number } = {},
+  opts: { ttlSeconds?: number; name?: string } = {},
 ): Promise<SpawnedPreview> {
   if (!existsSync(cwd)) throw new Error(`deployPreview: cwd 不在: ${cwd}`);
-  const name = previewName(projectId);
+  // opts.name 指定時はそれを再利用（同名 = 同 Cloud Run サービス = 同 URL の再デプロイ）。
+  const name = opts.name && isValidPreviewName(opts.name) ? opts.name : previewName(projectId);
   if (!isValidPreviewName(name)) throw new Error(`deployPreview: 不正な name: ${name}`);
   const image = previewImage(name);
   const ttlEpoch = Math.floor(Date.now() / 1000) + (opts.ttlSeconds ?? DEFAULT_TTL_SECONDS);
@@ -119,11 +183,18 @@ export async function deployPreview(
 
   const submit = buildSubmitArgs(cwd, image).map(shq).join(" ");
   const deploy = runDeployArgs(name, image, projectId, ttlEpoch).map(shq).join(" ");
-  // builds submit → log、run deploy → URL を urlFile（stderr は log）。timeout で暴走防止。
+  const iapEnable = iapEnableArgs(name).map(shq).join(" ");
+  const iapInvoker = iapInvokerArgs(name).map(shq).join(" ");
+  const iapBind = iapBindArgs(name).map(shq).join(" ");
+  // builds submit → log、run deploy → URL を urlFile（stderr は log）。
+  // その後 IAP 有効化＋domain 限定アクセス付与（公開せず社内ドメインのみ）。timeout で暴走防止。
   const shellCmd =
     `timeout ${DEPLOY_TIMEOUT_SECONDS} sh -c ${shq(
       `gcloud ${submit} >> ${shq(logFile)} 2>&1 && ` +
-        `gcloud ${deploy} 2>> ${shq(logFile)} 1> ${shq(urlFile)}`,
+        `gcloud ${deploy} 2>> ${shq(logFile)} 1> ${shq(urlFile)} && ` +
+        `gcloud ${iapEnable} >> ${shq(logFile)} 2>&1 && ` +
+        `gcloud ${iapInvoker} >> ${shq(logFile)} 2>&1 && ` +
+        `gcloud ${iapBind} >> ${shq(logFile)} 2>&1`,
     )}; echo $? > ${shq(doneFile)}`;
 
   const { spawn } = await import("child_process");
