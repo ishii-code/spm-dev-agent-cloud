@@ -1,6 +1,7 @@
 import { promises as fsp, constants as fsConstants } from "fs";
 import path from "path";
 import { prisma } from "./prisma";
+import { RUNNABLE_PARALLEL_STATUSES } from "./parallel-status";
 import { projectsRoot } from "./repos";
 import { parseAskHuman } from "./ask-human";
 import { pickMentionId, pickHitlAnswer } from "./slack-mention";
@@ -390,8 +391,10 @@ async function readLogTailSafe(doneFile: string): Promise<string> {
 
 export async function findRunnableProjects(): Promise<{ id: string }[]> {
   return prisma.project.findMany({
-    // "scaffolding" も対象に含める（VM worker が拾って create-next-app を実行）。
-    where: { parallelStatus: { in: ["running", "scaffolding"] }, parallelRunId: null },
+    where: {
+      parallelStatus: { in: [...RUNNABLE_PARALLEL_STATUSES] },
+      parallelRunId: null,
+    },
     select: { id: true },
   });
 }
