@@ -10,6 +10,10 @@ import {
   iapEnableArgs,
   iapInvokerArgs,
   iapBindArgs,
+  listPreviewsArgs,
+  parseExpiredPreviews,
+  parseActiveCount,
+  previewCapReached,
   teardownArgs,
   isValidPreviewName,
   buildRevisePrompt,
@@ -110,6 +114,34 @@ t("services delete ＋ AR image delete", () => {
   assert.deepEqual(imageDelete.slice(0, 4), ["artifacts", "docker", "images", "delete"]);
   assert.ok(imageDelete.some((x) => x.includes("spm-preview/preview-cmpz1234-abcdef")));
   assert.ok(imageDelete.includes("--delete-tags"));
+});
+
+console.log("TTL / cap（2.3）");
+t("listPreviewsArgs（label filter＋ttl 列）", () => {
+  const a = listPreviewsArgs();
+  assert.deepEqual(a.slice(0, 3), ["run", "services", "list"]);
+  assert.ok(a.includes("--filter=metadata.labels.spm-preview=true"));
+  assert.ok(a.some((x) => x.includes("spm-ttl")));
+  assert.ok(a.includes("--impersonate-service-account=preview-deployer@vets-biz-aigen-apps.iam.gserviceaccount.com"));
+});
+t("parseExpiredPreviews：ttl<now のみ／不正名・NaN は除外", () => {
+  const now = 1000;
+  const out = `preview-aaaa1111-bbbbbb\t900\npreview-cccc2222-dddddd\t1500\npreview-eeee3333-ffffff\tNaN\nnot-a-preview\t1\npreview-gg-hhhhhh\t800`;
+  const exp = parseExpiredPreviews(out, now);
+  assert.deepEqual(exp.sort(), ["preview-aaaa1111-bbbbbb", "preview-gg-hhhhhh"].sort()); // 900<1000, 800<1000
+  assert.ok(!exp.includes("preview-cccc2222-dddddd")); // 1500>1000
+  assert.ok(!exp.includes("preview-eeee3333-ffffff")); // NaN→残す
+  assert.ok(!exp.includes("not-a-preview")); // 不正名
+});
+t("parseActiveCount：有効 preview 行のみ計数", () => {
+  const out = `preview-aaaa1111-bbbbbb\t900\nnot-a-preview\t1\npreview-cccc2222-dddddd\t1500\n`;
+  assert.equal(parseActiveCount(out), 2);
+  assert.equal(parseActiveCount(""), 0);
+});
+t("previewCapReached：既定上限3", () => {
+  assert.equal(previewCapReached(2), false);
+  assert.equal(previewCapReached(3), true);
+  assert.equal(previewCapReached(5), true);
 });
 
 console.log("isValidPreviewName");

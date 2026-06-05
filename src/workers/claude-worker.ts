@@ -15,6 +15,11 @@ import {
   isExecHost,
 } from "../lib/parallel-tick";
 import { prisma } from "../lib/prisma";
+import { sweepExpiredPreviews } from "../lib/preview-deploy";
+
+// TTL 切れプレビューの定期 teardown（cron 相当）。worker ループ内で間引いて実行。
+const PREVIEW_SWEEP_INTERVAL_MS = 10 * 60 * 1000; // 10分
+let lastPreviewSweepAt = 0;
 
 // この worker が「実行ホスト」。claude 起動・pid/done-file 検査・scaffold など
 // host-local な exec 操作は SPM_EXEC_HOST=1 のプロセスでのみ許可される（#7）。
@@ -113,6 +118,18 @@ async function runOneTick(): Promise<void> {
     }
   }
   console.log(`[TICK] processed ${advanced} parts`);
+
+  // TTL 切れプレビューの teardown（10分間隔・VM 限定）。本処理を阻害しないよう間引き＋握り潰し。
+  if (isExecHost() && tickId - lastPreviewSweepAt > PREVIEW_SWEEP_INTERVAL_MS) {
+    lastPreviewSweepAt = tickId;
+    try {
+      const swept = await sweepExpiredPreviews();
+      if (swept.length) console.log(`[TICK] preview TTL sweep teardown: ${swept.join(", ")}`);
+    } catch (e) {
+      console.warn(`[ERROR] preview sweep failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   console.log(`[TICK] end tick=${tickId} errors=${errors}`);
 
   lastTickFinishedAt = Date.now();

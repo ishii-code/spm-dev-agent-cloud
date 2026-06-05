@@ -7,6 +7,10 @@ import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { promises as fs, readFileSync, existsSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileP = promisify(execFile);
 
 // 設定（env 上書き可。本番値を既定に）。
 const PROJECT = process.env.GCP_PROJECT || "vets-biz-aigen-apps";
@@ -20,6 +24,8 @@ const IAP_DOMAIN = process.env.PREVIEW_IAP_DOMAIN || "peco-japan.com";
 const PROJECT_NUMBER = process.env.GCP_PROJECT_NUMBER || "842623777962";
 const IAP_SA = `service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com`;
 const DEFAULT_TTL_SECONDS = Number(process.env.PREVIEW_TTL_SECONDS || 24 * 3600);
+// 同時プレビュー数の上限（超過時は新規 deploy を待機）。
+const MAX_CONCURRENT_PREVIEWS = Number(process.env.PREVIEW_MAX_CONCURRENT || 3);
 const DEPLOY_TIMEOUT_SECONDS = Number(process.env.PREVIEW_DEPLOY_TIMEOUT_SECONDS || 1200); // 20分
 const MAX_LOG_BYTES = 200_000;
 
@@ -148,6 +154,48 @@ export function isValidPreviewName(name: string): boolean {
   return /^preview-[a-z0-9]{2,}-[a-z0-9]{6}$/.test(name) && name.length <= 63;
 }
 
+// プレビュー一覧取得の引数列（純粋）。spm-preview=true ラベルの Cloud Run サービスを
+// `name<TAB>ttl` 形式で出す。
+export function listPreviewsArgs(): string[] {
+  return [
+    "run", "services", "list",
+    "--filter=metadata.labels.spm-preview=true",
+    `--region=${REGION}`,
+    `--project=${PROJECT}`,
+    "--format=value(metadata.name,metadata.labels.spm-ttl)",
+    `--impersonate-service-account=${DEPLOYER}`,
+    "--quiet",
+  ];
+}
+
+// 一覧出力（"name\tttl" 行）から TTL 切れ（spm-ttl < now）の preview 名を返す（純粋）。
+export function parseExpiredPreviews(listOutput: string, nowEpoch: number): string[] {
+  const out: string[] = [];
+  for (const line of (listOutput || "").split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t) continue;
+    const [name, ttlRaw] = t.split(/\s+/);
+    if (!name || !isValidPreviewName(name)) continue;
+    const ttl = Number.parseInt(ttlRaw ?? "", 10);
+    // ttl 不明（NaN）は安全側で残す（誤 teardown 回避）。
+    if (!Number.isNaN(ttl) && ttl < nowEpoch) out.push(name);
+  }
+  return out;
+}
+
+// 一覧出力から有効な preview 行数（同時数）を数える（純粋）。
+export function parseActiveCount(listOutput: string): number {
+  return (listOutput || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim().split(/\s+/)[0])
+    .filter((n) => n && isValidPreviewName(n)).length;
+}
+
+// cap 到達判定（純粋）。
+export function previewCapReached(activeCount: number): boolean {
+  return activeCount >= MAX_CONCURRENT_PREVIEWS;
+}
+
 // QA コメント → 実装 revise プロンプト（純粋）。プレビューへのフィードバックを既存実装に反映させる。
 export function buildRevisePrompt(comment: string): string {
   return (
@@ -264,4 +312,33 @@ export async function teardownPreview(name: string): Promise<{ pid: number; done
   proc.unref();
   console.log(`[PREVIEW] teardown spawned pid=${proc.pid} name=${name}`);
   return { pid: proc.pid, doneFile, logFile };
+}
+
+// プレビュー一覧を取得（gcloud・deployer impersonate）。失敗時は空文字。
+async function listPreviewsRaw(): Promise<string> {
+  try {
+    const { stdout } = await execFileP("gcloud", listPreviewsArgs(), { timeout: 60000 });
+    return stdout ?? "";
+  } catch {
+    return "";
+  }
+}
+
+// 現在の同時プレビュー数。
+export async function countActivePreviews(): Promise<number> {
+  return parseActiveCount(await listPreviewsRaw());
+}
+
+// TTL 切れプレビューを teardown（svc+image）。teardown した名前一覧を返す。
+export async function sweepExpiredPreviews(nowEpoch: number = Math.floor(Date.now() / 1000)): Promise<string[]> {
+  const expired = parseExpiredPreviews(await listPreviewsRaw(), nowEpoch);
+  for (const name of expired) {
+    try {
+      await teardownPreview(name);
+      console.log(`[PREVIEW] TTL teardown: ${name}`);
+    } catch (e) {
+      console.warn(`[PREVIEW] TTL teardown 失敗 ${name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return expired;
 }

@@ -17,6 +17,8 @@ import {
   readPreviewUrl,
   readPreviewLog,
   buildRevisePrompt,
+  countActivePreviews,
+  previewCapReached,
 } from "./preview-deploy";
 import { formatJst } from "./time";
 import {
@@ -1398,6 +1400,12 @@ async function advancePreviewQa(
     if (!cwd) return await finalizeNeedsReview(project, slack, sentinel?.id ?? null, ["作業ディレクトリ未設定でプレビュー不可"]);
 
     if (st === "pending" || st === "redeploy" || !sentinel) {
+      // 同時プレビュー数の上限チェック（新規 deploy のみ。redeploy=meta.name 有 は既存スロット再利用で対象外）。
+      const isRedeploy = !!meta.name;
+      if (!isRedeploy && previewCapReached(await countActivePreviews())) {
+        console.log(`[TICK] project=${projectId} preview cap 到達 → 待機`);
+        return { status: "no_op", reason: "preview_cap_wait" };
+      }
       const accCwd = await ensureAccessibleCwd(cwd).catch(() => null);
       if (!accCwd) return await finalizeNeedsReview(project, slack, sentinel?.id ?? null, ["preview 用 cwd アクセス不可"]);
       let spawned;
