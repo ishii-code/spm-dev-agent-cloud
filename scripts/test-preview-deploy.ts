@@ -108,12 +108,15 @@ t("IAP SA invoker 付与 args（対象サービス限定・run.invoker）", () =
 console.log("teardownArgs");
 t("services delete ＋ AR image delete", () => {
   const { serviceDelete, imageDelete } = teardownArgs("preview-cmpz1234-abcdef");
+  const DEPLOYER = "--impersonate-service-account=preview-deployer@vets-biz-aigen-apps.iam.gserviceaccount.com";
   assert.deepEqual(serviceDelete.slice(0, 4), ["run", "services", "delete", "preview-cmpz1234-abcdef"]);
   assert.ok(serviceDelete.includes("--region=asia-northeast1"));
   assert.ok(serviceDelete.includes("--quiet"));
+  assert.ok(serviceDelete.includes(DEPLOYER), "svc delete に deployer impersonate 必須（compute SA だと権限無しで黙って失敗）");
   assert.deepEqual(imageDelete.slice(0, 4), ["artifacts", "docker", "images", "delete"]);
   assert.ok(imageDelete.some((x) => x.includes("spm-preview/preview-cmpz1234-abcdef")));
   assert.ok(imageDelete.includes("--delete-tags"));
+  assert.ok(imageDelete.includes(DEPLOYER), "image delete に deployer impersonate 必須");
 });
 
 console.log("TTL / cap（2.3）");

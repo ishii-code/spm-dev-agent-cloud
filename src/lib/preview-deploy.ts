@@ -103,9 +103,12 @@ export function runDeployArgs(name: string, image: string, projectId: string, tt
 
 // teardown の引数列（純粋）。services delete ＋ AR イメージ delete。
 export function teardownArgs(name: string): { serviceDelete: string[]; imageDelete: string[] } {
+  // deploy 系（buildSubmitArgs/runDeployArgs/iap*/listPreviewsArgs）と同様に deployer を impersonate する。
+  // これが無いと VM 既定の compute SA で実行され、削除権限が無く teardown が黙って失敗していた
+  // （detached + stdio:ignore のため握り潰され、service/image が残存しキャップを埋める欠陥の修正）。
   return {
-    serviceDelete: ["run", "services", "delete", name, `--region=${REGION}`, `--project=${PROJECT}`, "--quiet"],
-    imageDelete: ["artifacts", "docker", "images", "delete", previewImage(name), "--delete-tags", "--quiet"],
+    serviceDelete: ["run", "services", "delete", name, `--region=${REGION}`, `--project=${PROJECT}`, `--impersonate-service-account=${DEPLOYER}`, "--quiet"],
+    imageDelete: ["artifacts", "docker", "images", "delete", previewImage(name), "--delete-tags", `--impersonate-service-account=${DEPLOYER}`, "--quiet"],
   };
 }
 
