@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test": "tsx scripts/middleware-auth.test.ts",
     "kill-all": "ps -eo pid,command | grep SPM_RUN_ID | grep -v grep | awk '{print $1}' | xargs -r kill -9; psql spm_dev_agent -c \"UPDATE \\\"Document\\\" SET \\\"executionStatus\\\"='awaiting_approval', \\\"approvalState\\\"='approved', \\\"execPid\\\"=NULL, \\\"execDoneFile\\\"=NULL WHERE \\\"executionStatus\\\"='executing'; UPDATE \\\"Project\\\" SET \\\"parallelRunId\\\"=NULL, \\\"parallelStatus\\\"='paused';\"",
     "kill-project": "node scripts/kill-project.js",
     "status-all": "node scripts/status-all.js",

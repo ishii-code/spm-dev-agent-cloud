@@ -36,3 +36,6 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+      - name: Unit tests (middleware auth)
+        run: npm test
