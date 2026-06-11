@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isAllowedRepo } from "@/lib/repos";
 import { decideProjectAccess } from "@/lib/project-access-decision";
+import { preferCachedOnLoad, stripPending } from "@/lib/chat-rehydrate";
 import { SYSTEMS, NEW_GROUP_LABEL, getSystem } from "@/lib/systems";
 import {
   BUSINESS_CATEGORIES,
@@ -265,6 +266,12 @@ export function ChatWorkspace({
   useEffect(() => {
     canWriteRef.current = canWrite;
   }, [canWrite]);
+  // 最新 isSending を、復帰時エフェクトから stale closure 無しで参照するための ref。
+  // 「この tab で実ストリーミング中か」の判定に使う（復帰時の DB 優先 / live 保持の分岐）。
+  const isSendingRef = useRef(false);
+  useEffect(() => {
+    isSendingRef.current = isSending;
+  }, [isSending]);
   const READONLY_MSG = "他のメンバーの案件のため、実行・編集はできません（閲覧のみ）";
 
   // 戻り値: 解決した sessionId（無ければ null）。sendMessage 側で
@@ -318,36 +325,30 @@ export function ChatWorkspace({
       return;
     }
 
-    // sessionStorage から復元できればそれを優先
-    let restoredFromStorage = false;
+    // sessionStorage は「初回フラッシュ回避の即時プレースホルダ」として使う。
+    // 固まったカーソル(pending)は落として表示（最終的に DB 全文へ置換される）。
+    let cachedParsed: ChatMessage[] | null = null;
     try {
       const stored = sessionStorage.getItem(chatStorageKey(activeProjectId));
       if (stored) {
         const parsed = JSON.parse(stored) as ChatMessage[];
         if (Array.isArray(parsed) && parsed.length > 0) {
-          setMessages(parsed);
-          restoredFromStorage = true;
+          cachedParsed = parsed;
+          setMessages(stripPending(parsed));
         }
       }
     } catch {
       // ignore parse errors
     }
 
-    // sessionStorage に無ければ DB から取得
+    // DB を最終真実源にする：loadProject が完全な保存済み messages を setMessages する。
+    // ③表示バグ修正: 旧実装はここで sessionStorage の途中版に必ず戻して DB を捨てていた
+    //   （遷移→復帰時に途切れたバブルが残る原因）。復帰時は reader 破棄済み＝非ストリーミング
+    //   なので DB を採用する。例外として「この tab で実ストリーミング中」のときだけ
+    //   live(cache) を保持し、DB fetch が進行中バブルを消さないようにする（回帰防止）。
     void loadProject(activeProjectId).then(() => {
-      // sessionStorage 優先で表示済みの場合は DB 結果で上書きしない（loadProject 内の setMessages 呼出後の整合性）
-      if (restoredFromStorage) {
-        try {
-          const stored = sessionStorage.getItem(chatStorageKey(activeProjectId));
-          if (stored) {
-            const parsed = JSON.parse(stored) as ChatMessage[];
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              setMessages(parsed);
-            }
-          }
-        } catch {
-          // ignore
-        }
+      if (preferCachedOnLoad(isSendingRef.current, cachedParsed)) {
+        setMessages(cachedParsed as ChatMessage[]);
       }
     });
   }, [activeProjectId, loadProject]);
