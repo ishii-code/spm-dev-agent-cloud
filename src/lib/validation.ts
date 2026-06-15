@@ -18,6 +18,12 @@ export function isValidNewRepoName(value: string): boolean {
   return /^[a-z0-9][a-z0-9-]{0,49}$/.test(value);
 }
 
+export type ProjectType = "existing" | "new";
+
+export function isProjectType(value: unknown): value is ProjectType {
+  return value === "existing" || value === "new";
+}
+
 export interface ValidationError {
   field: string;
   message: string;

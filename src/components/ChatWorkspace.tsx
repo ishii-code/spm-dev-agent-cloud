@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { isAllowedRepo } from "@/lib/repos";
+import { buildConfirmTargetBody, computeTargetGate } from "@/lib/confirm-target";
 import { decideProjectAccess } from "@/lib/project-access-decision";
 import { preferCachedOnLoad, stripPending } from "@/lib/chat-rehydrate";
 import { SYSTEMS, NEW_GROUP_LABEL, getSystem } from "@/lib/systems";
@@ -117,6 +117,7 @@ interface ProjectDetail {
     title: string;
     description: string | null;
     ownerId: number | null;
+    projectType: string;
     targetSystem: string | null;
     targetLabel: string | null;
     sessions: {
@@ -1471,7 +1472,7 @@ export function ChatWorkspace({
                     setProjects((prev) =>
                       prev.map((p) =>
                         p.id === activeProjectId
-                          ? { ...p, targetSystem: data.project.targetSystem, targetLabel: data.project.targetLabel }
+                          ? { ...p, projectType: data.project.projectType, targetSystem: data.project.targetSystem, targetLabel: data.project.targetLabel }
                           : p,
                       ),
                     );
@@ -2446,8 +2447,7 @@ function ExecutorPanel({
     setConfirmDiscard(false);
   };
 
-  const isNewRepo = projectType === "new" && targetSystem !== null;
-  const canExecute = targetSystem !== null && (isAllowedRepo(targetSystem) || isNewRepo);
+  const { isNewRepo, canExecute } = computeTargetGate({ targetSystem, projectType });
   const displayLabel = targetLabel ?? targetSystem ?? "—";
 
   // 並列実行が全パート終端（完了/スキップ/エラー）に達したら done とみなす。
@@ -2462,16 +2462,14 @@ function ExecutorPanel({
     );
 
   const handleConfirmTarget = async () => {
-    const target = localTarget === "__new__" ? newRepoName.trim() : localTarget;
-    if (!target) return;
-    const label =
-      localTarget === "__new__"
-        ? target
-        : (SYSTEMS.find((s) => s.id === localTarget)?.label ?? target);
+    // 核バグ修正(A): targetSystem/targetLabel に加え projectType も送る。
+    // "__new__" 選択時は "new"、既存システム選択時は "existing"。
+    const body = buildConfirmTargetBody(localTarget, newRepoName);
+    if (!body) return;
     await fetch(`/api/projects/${projectId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ targetSystem: target, targetLabel: label }),
+      body: JSON.stringify(body),
     });
     onProjectUpdate?.();
   };

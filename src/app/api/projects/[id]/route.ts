@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { requireProjectAccess } from "@/lib/project-access";
-import { isNonEmptyString, isValidNewRepoName, MAX_TITLE_LENGTH } from "@/lib/validation";
+import { isNonEmptyString, isValidNewRepoName, isProjectType, MAX_TITLE_LENGTH, type ProjectType } from "@/lib/validation";
 import { isSystemId } from "@/lib/systems";
 import { isBusinessCategory, type BusinessCategoryId } from "@/lib/categories";
 import { ORG_ORDER, type OrgNameType } from "@/types/portfolio";
@@ -88,6 +88,7 @@ export async function PATCH(
     title?: string;
     targetSystem?: string | null;
     targetLabel?: string | null;
+    projectType?: ProjectType;
     businessCategory?: BusinessCategoryId;
     orgName?: OrgNameType;
   } = {};
@@ -112,6 +113,14 @@ export async function PATCH(
     } else {
       return Response.json({ error: "invalid_targetSystem" }, { status: 400 });
     }
+  }
+
+  if ("projectType" in obj) {
+    const pt = obj.projectType;
+    if (!isProjectType(pt)) {
+      return Response.json({ error: "invalid_projectType" }, { status: 400 });
+    }
+    updateData.projectType = pt;
   }
 
   if ("targetLabel" in obj) {
