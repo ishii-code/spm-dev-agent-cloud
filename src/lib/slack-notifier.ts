@@ -1,4 +1,5 @@
 import { withMention } from "./slack";
+import { pickMentionId } from "./slack-mention";
 import { formatJst } from "./time";
 
 // 通知タイトル整形（B2）：登録者名プレフィックス。ownerName=User.name、未設定時は "ごう"。
@@ -7,17 +8,31 @@ export function formatProjectLabel(ownerName: string | null | undefined, project
   return `【${name}】${projectTitle}`;
 }
 
-// projectId から登録者(owner)名を取得（失敗・未設定は "ごう" にフォールバック）。
-async function projectOwnerName(projectId: string): Promise<string> {
+// projectId から通知メタ（ラベル用 owner 名 / @mention 用 ID / スレッド ts）を 1 クエリで取得。
+//   - ownerName: User.name（未設定・失敗は "ごう"）
+//   - mentionId: owner.slackId → creatorSlackId → undefined（呼び出し側で固定 ID にフォールバック）
+//     ※ owner.name だけ load して slackId を渡さず固定 U0AMRAQDW65 にフォールバックしていた不具合の修正点。
+//   - slackThreadTs: 既存スレッドへの追従用
+async function projectNotifyMeta(
+  projectId: string,
+): Promise<{ ownerName: string; mentionId?: string; slackThreadTs?: string }> {
   try {
     const { prisma } = await import("./prisma");
     const p = await prisma.project.findUnique({
       where: { id: projectId },
-      select: { owner: { select: { name: true } } },
+      select: {
+        creatorSlackId: true,
+        slackThreadTs: true,
+        owner: { select: { name: true, slackId: true } },
+      },
     });
-    return p?.owner?.name?.trim() || "ごう";
+    return {
+      ownerName: p?.owner?.name?.trim() || "ごう",
+      mentionId: pickMentionId(p?.owner?.slackId, p?.creatorSlackId),
+      slackThreadTs: p?.slackThreadTs ?? undefined,
+    };
   } catch {
-    return "ごう";
+    return { ownerName: "ごう" };
   }
 }
 
@@ -47,7 +62,7 @@ export {
 } from "./slack-approval";
 export type { SlackApprovalResult } from "./slack-approval";
 
-async function postSlack(text: string, threadTs?: string): Promise<string | undefined> {
+async function postSlack(text: string, threadTs?: string, mentionId?: string): Promise<string | undefined> {
   if (!SLACK_TOKEN) return undefined;
   try {
     const res = await fetch("https://slack.com/api/chat.postMessage", {
@@ -58,7 +73,7 @@ async function postSlack(text: string, threadTs?: string): Promise<string | unde
       },
       body: JSON.stringify({
         channel: SLACK_CHANNEL,
-        text: withMention(text),
+        text: withMention(text, mentionId),
         thread_ts: threadTs,
       }),
     });
@@ -72,7 +87,8 @@ async function postSlack(text: string, threadTs?: string): Promise<string | unde
 async function postSlackBlocks(
   blocks: Record<string, unknown>[],
   fallbackText: string,
-  threadTs?: string
+  threadTs?: string,
+  mentionId?: string
 ): Promise<string | undefined> {
   if (!SLACK_TOKEN) return undefined;
   try {
@@ -84,7 +100,7 @@ async function postSlackBlocks(
       },
       body: JSON.stringify({
         channel: SLACK_CHANNEL,
-        text: withMention(fallbackText),
+        text: withMention(fallbackText, mentionId),
         blocks,
         thread_ts: threadTs,
       }),
@@ -102,12 +118,14 @@ export async function notifyExecutionStart(
   targetRepo: string,
   _startTime: number
 ): Promise<string | undefined> {
-  const ownerName = await projectOwnerName(projectId);
+  const { ownerName, mentionId } = await projectNotifyMeta(projectId);
   const ts = await postSlack(
     `🚀 *${formatProjectLabel(ownerName, projectTitle)} 開発開始*\n` +
       `対象: \`${targetRepo}\`\n` +
       `時刻: ${formatJst()}\n` +
-      `確認: ${appBaseUrl()}`
+      `確認: ${appBaseUrl()}`,
+    undefined,
+    mentionId,
   );
   if (ts) {
     const { prisma } = await import("./prisma");
@@ -122,15 +140,8 @@ export async function notifyExecutionStart(
 }
 
 export async function notifyThread(projectId: string, text: string): Promise<void> {
-  const { prisma } = await import("./prisma");
-  const project = await prisma.project
-    .findUnique({
-      where: { id: projectId },
-      select: { slackThreadTs: true },
-    })
-    .catch(() => null);
-  const threadTs = project?.slackThreadTs ?? undefined;
-  await postSlack(text, threadTs);
+  const { mentionId, slackThreadTs } = await projectNotifyMeta(projectId);
+  await postSlack(text, slackThreadTs, mentionId);
 }
 
 export async function notifyComplete(
@@ -142,7 +153,7 @@ export async function notifyComplete(
   const sec = Math.round((Date.now() - startTime) / 1000);
   const emoji = success ? "✅" : "❌";
   const label = success ? "実装完了" : "エラーが発生しました";
-  const ownerName = await projectOwnerName(projectId);
+  const { ownerName } = await projectNotifyMeta(projectId);
   await notifyThread(projectId, `${emoji} *${formatProjectLabel(ownerName, projectTitle)} ${label}*\n所要時間: ${sec}秒`);
 }
 
@@ -151,11 +162,7 @@ export async function notifySecurityApproval(
   approvalId: string,
   description: string
 ): Promise<void> {
-  const { prisma } = await import("./prisma");
-  const project = await prisma.project
-    .findUnique({ where: { id: projectId }, select: { slackThreadTs: true } })
-    .catch(() => null);
-  const threadTs = project?.slackThreadTs ?? undefined;
+  const { mentionId, slackThreadTs: threadTs } = await projectNotifyMeta(projectId);
 
   await postSlackBlocks(
     [
@@ -193,6 +200,7 @@ export async function notifySecurityApproval(
       },
     ],
     `⚠️ セキュリティ確認が必要です: ${description}`,
-    threadTs
+    threadTs,
+    mentionId
   );
 }
