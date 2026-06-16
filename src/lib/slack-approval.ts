@@ -7,6 +7,16 @@
 
 import { withMention } from "./slack";
 import { formatJst } from "./time";
+import {
+  reactionVerdict,
+  acceptedReactionNames,
+  type SlackReaction,
+} from "./slack-mention";
+
+// reaction 受理の既定ユーザー（owner ID 未指定時の admin 単独フォールバック）。
+function fixedAcceptId(): string {
+  return process.env.SLACK_MENTION_USER_ID ?? process.env.ASK_USER_ID ?? "U0AMRAQDW65";
+}
 
 const SLACK_CHANNEL = process.env.SLACK_APPROVAL_CHANNEL ?? "C0B3D1S0LER";
 const SLACK_TOKEN = process.env.SLACK_BOT_TOKEN;
@@ -101,7 +111,7 @@ async function postMessage(
 async function getReactions(
   messageTs: string,
   channel: string = SLACK_CHANNEL,
-): Promise<string[]> {
+): Promise<SlackReaction[]> {
   if (!SLACK_TOKEN) return [];
   try {
     const res = await fetch(
@@ -110,11 +120,11 @@ async function getReactions(
     );
     const data = (await res.json()) as {
       ok: boolean;
-      message?: { reactions?: { name: string }[] };
+      message?: { reactions?: { name: string; users?: string[] }[] };
     };
     if (!data.ok) return [];
     const reactions = data.message?.reactions ?? [];
-    return reactions.map((r) => r.name);
+    return reactions.map((r) => ({ name: r.name, users: r.users ?? [] }));
   } catch {
     return [];
   }
@@ -129,22 +139,16 @@ export type SlackApprovalResult = "approved" | "rejected";
 //   - どちらも無し → "pending"
 //   - Slack 未設定 / messageTs 空 → "approved"（デッドロック回避）
 // channel は対象メッセージの所属チャンネル（DM=D... または共有チャンネル）。
-const APPROVE_REACTIONS = ["white_check_mark", "heavy_check_mark", "+1", "thumbsup"];
-const REJECT_REACTIONS = ["x", "no_entry_sign"];
-
+// acceptUserIds: 承認/拒否とみなすユーザー（owner∪admin）。共有チャンネルで第三者の
+//   reaction を誤受理しないための絞り込み。未指定/空は admin 単独にフォールバック。
 export async function checkReactionOnce(
   messageTs: string,
   channel: string = SLACK_CHANNEL,
+  acceptUserIds?: string[],
 ): Promise<"approved" | "rejected" | "pending"> {
   if (!SLACK_TOKEN || !messageTs) return "approved";
-  const reactions = await getReactions(messageTs, channel);
-  if (reactions.some((r) => APPROVE_REACTIONS.includes(r))) {
-    return "approved";
-  }
-  if (reactions.some((r) => REJECT_REACTIONS.includes(r))) {
-    return "rejected";
-  }
-  return "pending";
+  const accepted = acceptUserIds && acceptUserIds.length ? acceptUserIds : [fixedAcceptId()];
+  return reactionVerdict(await getReactions(messageTs, channel), accepted);
 }
 
 // HITL 回答受理用：質問メッセージ(parentTs=その質問を親とするスレッド)の返信のうち、
@@ -220,15 +224,9 @@ export async function waitForReactionApproval(
     const elapsed = Math.round((Date.now() - startTime) / 1000);
     onWaiting?.(elapsed);
 
-    const reactions = await getReactions(messageTs);
-
-    if (reactions.includes("white_check_mark") || reactions.includes("heavy_check_mark")) {
-      return "approved";
-    }
-
-    if (reactions.includes("x") || reactions.includes("no_entry_sign")) {
-      return "rejected";
-    }
+    const verdict = reactionVerdict(await getReactions(messageTs), [fixedAcceptId()]);
+    if (verdict === "approved") return "approved";
+    if (verdict === "rejected") return "rejected";
 
     const now = Date.now();
     if (now - lastReminderTime >= REMINDER_INTERVAL_MS) {
@@ -273,14 +271,12 @@ export async function waitForSlackApproval(
     const elapsed = Math.round((Date.now() - startTime) / 1000);
     onWaiting?.(elapsed);
 
-    const reactions = await getReactions(messageTs);
-
-    if (reactions.includes("white_check_mark") || reactions.includes("heavy_check_mark")) {
+    const verdict = reactionVerdict(await getReactions(messageTs), [fixedAcceptId()]);
+    if (verdict === "approved") {
       await postMessage(`✅ 承認されました。実装を続行します。`, threadTs);
       return "approved";
     }
-
-    if (reactions.includes("x") || reactions.includes("no_entry_sign")) {
+    if (verdict === "rejected") {
       await postMessage(`❌ 却下されました。実装を中止します。`, threadTs);
       return "rejected";
     }
@@ -331,8 +327,8 @@ export async function waitForSlackChoice(
     const elapsed = Math.round((Date.now() - startTime) / 1000);
     onWaiting?.(elapsed);
 
-    const reactions = await getReactions(messageTs);
-    for (const reaction of reactions) {
+    const names = acceptedReactionNames(await getReactions(messageTs), [fixedAcceptId()]);
+    for (const reaction of names) {
       const num = NUMBER_EMOJI_REVERSE[reaction];
       if (num && num <= choices.length) {
         await postMessage(

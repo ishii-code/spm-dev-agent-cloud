@@ -19,6 +19,49 @@ export function isValidSlackMemberId(s: string): boolean {
   return /^[UW][A-Z0-9]{6,}$/.test(s);
 }
 
+// 受理ユーザー ID 集合（owner∪admin）を組む（純粋）。owner(mentionId) が空なら admin 単独。
+// 重複は除去。anti-spoof: ここに含まれないユーザーの返信/リアクションは受理しない。
+export function acceptIdsFrom(
+  ownerMentionId: string | null | undefined,
+  fixedAdminId: string,
+): string[] {
+  return Array.from(
+    new Set([ownerMentionId, fixedAdminId].filter((v): v is string => Boolean(v && v.trim()))),
+  );
+}
+
+// reactions.get 由来の 1 リアクション（emoji 名＋付与ユーザー一覧）。
+export interface SlackReaction {
+  name: string;
+  users: string[];
+}
+
+const APPROVE_REACTIONS = ["white_check_mark", "heavy_check_mark", "+1", "thumbsup"];
+const REJECT_REACTIONS = ["x", "no_entry_sign"];
+
+// 受理ユーザー(acceptUserIds)が付けた reaction の emoji 名だけを返す（純粋）。
+// 共有チャンネルで第三者の reaction を弾くための核。acceptUserIds 空なら誰も採用しない（安全側）。
+export function acceptedReactionNames(
+  reactions: SlackReaction[],
+  acceptUserIds: string[],
+): string[] {
+  if (!acceptUserIds.length) return [];
+  return reactions
+    .filter((r) => (r.users ?? []).some((u) => acceptUserIds.includes(u)))
+    .map((r) => r.name);
+}
+
+// 承認/拒否/保留の判定（純粋）。受理ユーザーが付けた ✅/👍 → approved、❌ → rejected、無し → pending。
+export function reactionVerdict(
+  reactions: SlackReaction[],
+  acceptUserIds: string[],
+): "approved" | "rejected" | "pending" {
+  const names = acceptedReactionNames(reactions, acceptUserIds);
+  if (names.some((n) => APPROVE_REACTIONS.includes(n))) return "approved";
+  if (names.some((n) => REJECT_REACTIONS.includes(n))) return "rejected";
+  return "pending";
+}
+
 // HITL 回答の選定（純粋）。replies は受理対象ユーザーの返信を時系列（古→新）で渡す。
 //  - choices あり（番号選択式）: 新しい順に最初の「有効な番号(1..N)」を採用し対応 choice を返す。
 //    番号でない meta テキスト（質問の言い換え/補足等）は回答にしない（null のまま）。

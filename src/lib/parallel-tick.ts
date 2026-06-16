@@ -4,7 +4,7 @@ import { prisma } from "./prisma";
 import { RUNNABLE_PARALLEL_STATUSES } from "./parallel-status";
 import { projectsRoot } from "./repos";
 import { parseAskHuman } from "./ask-human";
-import { pickMentionId, pickHitlAnswer } from "./slack-mention";
+import { pickMentionId, pickHitlAnswer, acceptIdsFrom } from "./slack-mention";
 import {
   detectChanges,
   detectBoilerplate,
@@ -29,7 +29,6 @@ import {
 import {
   checkReactionOnce,
   postSlackTo,
-  openDmChannel,
   slackConfigured,
   approvalChannel,
   readUserReplies,
@@ -83,18 +82,20 @@ async function resolveSlackTarget(project: {
   if (!slackConfigured()) return null;
   const oid = await ownerSlackId(project.ownerId);
   const mentionId = pickMentionId(oid, project.creatorSlackId);
-  // DM 宛先も owner.slackId を優先（無ければ creatorSlackId）。現 creatorSlackId 動作は保持。
-  const dmId = oid ?? project.creatorSlackId;
-  if (dmId) {
-    const dm = await openDmChannel(dmId);
-    if (dm) return { channel: dm, mentionId };
-    console.warn(`[TICK] DM open 失敗 → 共有チャンネルにフォールバック (dmId=${dmId})`);
-  }
+  // 承認・HITL は共有チャンネル（SLACK_APPROVAL_CHANNEL）へ固定投稿し、owner を @mention する。
+  // 以前は owner/creator の DM 優先だったが、チーム可視性のためチャンネル一本化（DM 分岐は廃止）。
+  // ※共有チャンネルでの誤受理防止は reaction/返信の acceptIds 絞り込み（hitlAcceptIds）で担保。
   return {
     channel: approvalChannel(),
     threadTs: project.slackThreadTs ?? undefined,
     mentionId,
   };
+}
+
+// HITL/承認の受理ユーザー集合（owner∪admin）。共有チャンネルで第三者の返信/reaction を弾く。
+function hitlAcceptIds(slack: SlackTarget | null): string[] {
+  const FIXED_ID = process.env.SLACK_MENTION_USER_ID ?? process.env.ASK_USER_ID ?? "U0AMRAQDW65";
+  return acceptIdsFrom(slack?.mentionId, FIXED_ID);
 }
 
 // SKIP_APPROVAL=true で承認をスキップ（開発・テスト用退避口）。
@@ -1081,15 +1082,14 @@ async function advanceWaitingForHuman(
   if (!ts) return { status: "no_op", reason: "hitl_no_ts" };
   const ch = channel ?? approvalChannel();
   // 受理対象＝owner.slackId(=slack.mentionId で解決済) ∪ 固定 ID。owner 未設定なら固定のみ（後方互換・anti-spoof）。
-  const FIXED_ID = process.env.SLACK_MENTION_USER_ID ?? process.env.ASK_USER_ID ?? "U0AMRAQDW65";
-  const acceptIds = Array.from(new Set([slack?.mentionId, FIXED_ID].filter(Boolean) as string[]));
+  const acceptIds = hitlAcceptIds(slack);
   const choices = Array.isArray(next.humanChoices) ? (next.humanChoices as string[]) : [];
   let answer: string | null = null;
   const replies = await readUserReplies(ts, ch, acceptIds);
   // 番号選択式は有効番号を優先（meta テキストは回答にしない）、自由記述は最新返信。
   answer = pickHitlAnswer(replies, choices);
   if (!answer) {
-    const r = await checkReactionOnce(ts, ch);
+    const r = await checkReactionOnce(ts, ch, acceptIds);
     if (r === "approved") answer = "はい";
     else if (r === "rejected") answer = "いいえ";
   }
@@ -1200,9 +1200,9 @@ async function advanceVerification(
     const ch = slack?.channel ?? approvalChannel();
     const ts = sentinel.humanQuestionTs;
     if (ts) {
-      const replies = await readUserReplies(ts, ch);
+      const replies = await readUserReplies(ts, ch, hitlAcceptIds(slack));
       const reverify = replies.some((r) => /再検証|recheck|re-?verify/i.test(r));
-      const approve = replies.some((r) => /完了|承認|approve|done|ok/i.test(r));
+      const approve = replies.some((r) => /(^|\s)(完了|承認|approve|done|ok)(\s|$)/i.test(r));
       if (reverify) {
         await prisma.document.update({
           where: { id: sentinel.id },
@@ -1218,7 +1218,7 @@ async function advanceVerification(
       if (approve) {
         return await finalizeOverrideDone(project, slack, sentinel.id, "reply:承認");
       }
-      const r = await checkReactionOnce(ts, ch);
+      const r = await checkReactionOnce(ts, ch, hitlAcceptIds(slack));
       if (r === "approved") return await finalizeOverrideDone(project, slack, sentinel.id, "reaction:✅");
     }
     return { status: "no_op", reason: "needs_review_waiting" };
@@ -1486,10 +1486,10 @@ async function advancePreviewQa(
 
   // awaiting_qa：✅/完了 → done、コメント → revise。
   if (ts) {
-    const replies = await readUserReplies(ts, ch);
+    const replies = await readUserReplies(ts, ch, hitlAcceptIds(slack));
     const approve =
-      replies.some((r) => /(^|\s)(完了|承認|approve|done|ok|✅)(\s|$)/i.test(r)) ||
-      (await checkReactionOnce(ts, ch)) === "approved";
+      replies.some((r) => /(^|\s)(完了|承認|approve|done|ok)(\s|$)/i.test(r)) ||
+      (await checkReactionOnce(ts, ch, hitlAcceptIds(slack))) === "approved";
     if (approve) {
       return await finalizePreviewDone(project, slack, sentinel.id, meta.name);
     }
@@ -1570,7 +1570,7 @@ async function advanceAwaitingApproval(
   }
 
   // リアクションを 1 回だけ確認。付くまでは pending=待機（自動承認しない）。
-  const reaction = await checkReactionOnce(next.slackApprovalTs, slack.channel);
+  const reaction = await checkReactionOnce(next.slackApprovalTs, slack.channel, hitlAcceptIds(slack));
 
   if (reaction === "approved") {
     // approvalState='posted' → 'approved' を atomic claim（executionStatus は据置）。

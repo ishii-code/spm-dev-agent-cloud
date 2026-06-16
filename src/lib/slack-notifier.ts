@@ -36,7 +36,7 @@ async function projectNotifyMeta(
   }
 }
 
-const SLACK_CHANNEL = "C0B3D1S0LER";
+const SLACK_CHANNEL = process.env.SLACK_APPROVAL_CHANNEL ?? "C0B3D1S0LER";
 const SLACK_TOKEN = process.env.SLACK_BOT_TOKEN;
 
 // Slack メッセージ内の「確認」リンク等の公開ベースURL。
